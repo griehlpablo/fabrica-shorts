@@ -43,3 +43,5 @@ projetos/*/midias_baixadas/
 projetos/*/render/
 projetos/*/audio/
 projetos/*/pacote_postagem/*.mp4
+
+biblioteca/catalogo_midias.json
