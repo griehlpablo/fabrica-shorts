@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -42,11 +43,34 @@ PROJECT_STEPS = [
 ]
 
 
-def slugify(texto: str) -> str:
+def criar_slug(texto: str) -> str:
     normalized = unicodedata.normalize("NFKD", texto)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
     ascii_text = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_text).strip("_").lower()
     return ascii_text or "projeto_sem_titulo"
+
+
+def slugify(texto: str) -> str:
+    return criar_slug(texto)
+
+
+def normalizar_texto_portugues(texto: str) -> str:
+    texto = unicodedata.normalize("NFC", texto or "")
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def sanitizar_nome_arquivo(texto: str) -> str:
+    texto = normalizar_texto_portugues(texto)
+    texto = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", texto)
+    texto = re.sub(r"\s+", " ", texto).strip(" .")
+    return texto or "arquivo"
+
+
+def ambiente_utf8() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def projeto_path(base_dir: Path, nome: str) -> Path:
@@ -162,6 +186,7 @@ def obter_duracao_midia(caminho: Path) -> float | None:
         encoding="utf-8",
         errors="replace",
         shell=False,
+        env=ambiente_utf8(),
         timeout=30,
     )
     if resultado.returncode != 0:
@@ -191,6 +216,7 @@ def executar(
             encoding="utf-8",
             errors="replace",
             shell=False,
+            env=ambiente_utf8(),
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:

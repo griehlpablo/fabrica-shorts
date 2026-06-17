@@ -41,29 +41,29 @@ def gerar_roteiro_projeto(pasta_projeto: Path) -> str:
 
 def _roteiro_curiosidade_padrao(tema: str) -> str:
     return (
-        f"{tema} parece uma curiosidade pequena, ate voce perceber que ela virou historia. "
-        "Primeiro vem a imagem: uma frase repetida, uma cena marcante, uma comparacao facil de lembrar. "
+        f"{tema} parece uma curiosidade pequena, até você perceber que ela virou história. "
+        "Primeiro vem a imagem: uma frase repetida, uma cena marcante, uma comparação fácil de lembrar. "
         "Depois vem o contexto, porque quase todo mito nasce de um detalhe real que foi aumentado pelo tempo. "
         "A virada aparece quando a fama encontra a realidade. "
-        "O que parecia simples ganha limites, personagens, duvidas e exageros. "
-        "E e ai que o assunto fica interessante: nao pelo impacto inicial, mas pelo caminho que transformou um fato em memoria popular. "
-        f"No fim, {tema} mostra que algumas lendas nao nascem de uma mentira. Nascem de uma verdade contada vezes demais."
+        "O que parecia simples ganha limites, personagens, dúvidas e exageros. "
+        "E é aí que o assunto fica interessante: não pelo impacto inicial, mas pelo caminho que transformou um fato em memória popular. "
+        f"No fim, {tema} mostra que algumas lendas não nascem de uma mentira. Nascem de uma verdade contada vezes demais."
     )
 
 
 def _roteiro_arma_cultural(tema: str) -> str:
     return (
-        "Ela virou simbolo de forca no cinema. "
-        f"Mas a fama de {tema} nao nasceu so da potencia. Nasceu da imagem. Do som. Da forma como Hollywood transformou um objeto mecanico em lenda. "
-        "Durante anos, filmes e historias policiais venderam a ideia de algo quase imparavel. "
-        "So que fora da tela, a conversa muda. "
-        "Potencia nao significa controle, e controle importa muito mais do que a cena costuma mostrar. "
-        "Peso, recuo e contexto fazem a realidade parecer menos cinematografica, mas muito mais interessante. "
-        f"No fim, {tema} e menos sobre ser imparavel, e mais sobre como o cinema transforma mecanica em mito."
+        "Ela virou símbolo de força no cinema. "
+        f"Mas a fama de {tema} não nasceu só da potência. Nasceu da imagem. Do som. Da forma como Hollywood transformou um objeto mecânico em lenda. "
+        "Durante anos, filmes e histórias policiais venderam a ideia de algo quase imparável. "
+        "Só que fora da tela, a conversa muda. "
+        "Potência não significa controle, e controle importa muito mais do que a cena costuma mostrar. "
+        "Peso, recuo e contexto fazem a realidade parecer menos cinematográfica, mas muito mais interessante. "
+        f"No fim, {tema} é menos sobre ser imparável, e mais sobre como o cinema transforma mecânica em mito."
     )
 
 
 def _tema_sensivel_armas(tema: str) -> bool:
     texto = tema.lower()
-    termos = ["arma", "revolver", "pistola", "magnum", "calibre", ".44", "44"]
+    termos = ["arma", "revolver", "revólver", "pistola", "magnum", "calibre", ".44", "44"]
     return any(termo in texto for termo in termos)

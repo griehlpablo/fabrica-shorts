@@ -21,12 +21,13 @@ def gerar_pacote(pasta_projeto: Path) -> None:
             [
                 "[ ] Revisar fatos.",
                 "[ ] Revisar direitos das midias.",
-                "[ ] Confirmar que o conteudo nao ensina pratica perigosa.",
-                "[ ] Conferir audio.",
+                "[ ] Conferir se o video tem audio.",
                 "[ ] Conferir legenda.",
+                "[ ] Conferir acentos.",
+                "[ ] Conferir se nao ha reticencias artificiais.",
                 "[ ] Conferir se o video esta em 1080x1920.",
+                "[ ] Conferir conteudo sensivel.",
                 "[ ] Postar manualmente nas plataformas.",
-                "[ ] Evitar marca d'agua.",
             ]
         )
         + "\n",
@@ -36,6 +37,9 @@ def gerar_pacote(pasta_projeto: Path) -> None:
     legenda = pasta_projeto / "legendas" / "legenda.srt"
     if legenda.exists():
         (pacote / "legenda.srt").write_text(legenda.read_text(encoding="utf-8"), encoding="utf-8")
+    legenda_ass = pasta_projeto / "legendas" / "legenda.ass"
+    if legenda_ass.exists():
+        (pacote / "legenda.ass").write_text(legenda_ass.read_text(encoding="utf-8"), encoding="utf-8")
 
     atualizar_status(pasta_projeto, status="pacote_pronto", pacote="concluido")
     print("Pacote de postagem gerado")

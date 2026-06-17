@@ -17,7 +17,8 @@ def verificar_midias(base_dir: Path, pasta_projeto: Path) -> list[dict]:
     referencias = []
 
     for cena in cenas:
-        encontrada = _encontrar_midia(biblioteca, cena.get("palavras_chave", []), cena.get("tipo_midia"))
+        palavras_busca = list(cena.get("palavras_chave_slug", [])) + list(cena.get("palavras_chave", []))
+        encontrada = _encontrar_midia(biblioteca, palavras_busca, cena.get("tipo_midia"))
         item = {
             "cena_id": cena["id"],
             "status": "pendente",

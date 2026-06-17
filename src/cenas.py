@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from math import ceil
 
-from src.utils import slugify
+from src.utils import criar_slug, normalizar_texto_portugues
 
 
 STOPWORDS = {
@@ -16,7 +16,7 @@ STOPWORDS = {
     "pouco",
     "real",
     "tema",
-    "voce",
+    "você",
     "mais",
     "menos",
     "entre",
@@ -30,11 +30,11 @@ STOPWORDS = {
 
 
 TEXTOS_VISUAIS = [
-    "A lenda por tras disso",
+    "A lenda por trás disso",
     "Hollywood exagerou?",
-    "A realidade e diferente",
+    "A realidade é diferente",
     "O detalhe que muda tudo",
-    "Potencia nao e tudo",
+    "Potência não é tudo",
     "Mito contra realidade",
     "Por que ficou famoso?",
     "O impacto na cultura pop",
@@ -63,6 +63,7 @@ def gerar_cenas(roteiro: str, tema: str) -> list[dict]:
                 "legenda_curta": _legenda_curta(narracao),
                 "midia_necessaria": f"Imagem ou video relacionado a {', '.join(palavras[:3])}",
                 "palavras_chave": palavras,
+                "palavras_chave_slug": _slug_palavras_chave(palavras),
                 "tipo_midia": "imagem" if idx % 3 else "video",
                 "status_midia": "pendente",
             }
@@ -130,7 +131,7 @@ def _palavras_chave(texto: str, tema: str) -> list[str]:
     termos = []
     for parte in [tema, texto]:
         for raw in re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", parte.lower()):
-            termo = slugify(raw)
+            termo = normalizar_texto_portugues(raw)
             if termo and termo not in STOPWORDS and termo not in termos:
                 termos.append(termo)
     return termos[:8] or ["curiosidade", "documentario", "fatos"]
@@ -142,7 +143,7 @@ def _texto_tela(idx: int, tema: str, palavras: list[str]) -> str:
     if idx - 2 < len(TEXTOS_VISUAIS):
         texto = TEXTOS_VISUAIS[idx - 2]
         if idx == 5 and palavras:
-            texto = f"{palavras[0].replace('_', ' ').title()} nao e tudo"
+            texto = f"{palavras[0].replace('_', ' ').title()} não é tudo"
         return texto
     if palavras:
         return palavras[0].replace("_", " ").title()
@@ -151,13 +152,15 @@ def _texto_tela(idx: int, tema: str, palavras: list[str]) -> str:
 
 def _legenda_curta(texto: str) -> str:
     texto = " ".join(texto.split())
-    if len(texto) <= 95:
-        return texto
-    return texto[:92].rsplit(" ", 1)[0].rstrip() + "..."
+    return texto
 
 
 def _titulo_curto_tema(tema: str) -> str:
     tema = " ".join(tema.split())
     if len(tema) <= 34:
         return tema
-    return tema[:31].rstrip() + "..."
+    return tema
+
+
+def _slug_palavras_chave(palavras: list[str]) -> list[str]:
+    return [criar_slug(palavra) for palavra in palavras]

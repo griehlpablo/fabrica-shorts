@@ -4,7 +4,7 @@ import subprocess
 import traceback
 from pathlib import Path
 
-from src.legendas import ler_srt
+from src.legendas import fonte_legenda, gerar_ass_de_srt, legenda_sincronizada, ler_srt
 from src.utils import atualizar_status, carregar_json_arquivo, executar, ffmpeg_disponivel, ffprobe_disponivel, salvar_json
 
 
@@ -28,7 +28,10 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
         from src.legendas import gerar_legendas
 
         gerar_legendas(pasta_projeto)
-    blocos_srt = _blocos_srt_edge_tts(pasta_projeto)
+    ass_path = _legenda_ass(pasta_projeto)
+    usar_ass = bool(ass_path and legenda_sincronizada(pasta_projeto))
+    ass_aplicado = False
+    blocos_srt = [] if usar_ass else _blocos_srt_sincronizada(pasta_projeto)
     plano = carregar_json_arquivo(pasta_projeto / "plano_midias.json", default=[])
     plano_por_cena = {item["cena_id"]: item for item in plano}
     tema = _tema_projeto(pasta_projeto)
@@ -58,8 +61,11 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
             else:
                 segmento = render_dir / f"cena_{int(cena['id']):03}.mp4"
                 _apagar_mp4_vazio(segmento)
+                cena_render = dict(cena)
+                if usar_ass:
+                    cena_render["sem_legenda_visual"] = True
                 usou_midia = _renderizar_cena(
-                    cena=cena,
+                    cena=cena_render,
                     arquivo=arquivo_valido,
                     saida=segmento,
                     pasta_projeto=pasta_projeto,
@@ -124,7 +130,17 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
             etapa="concatenar_cenas",
         )
         _validar_video_gerado(video_sem_audio, cmd=cmd_concat)
-        _gerar_video_final_com_audio(pasta_projeto, video_sem_audio, saida, exigir_audio=modo_narrado)
+        video_para_audio = video_sem_audio
+        if usar_ass and ass_path:
+            video_com_legenda = render_dir / "video_com_legenda_ass.mp4"
+            _apagar_mp4_vazio(video_com_legenda)
+            try:
+                _aplicar_legenda_ass(pasta_projeto, video_sem_audio, ass_path, video_com_legenda)
+                video_para_audio = video_com_legenda
+                ass_aplicado = True
+            except RuntimeError:
+                raise RuntimeError("Falha ao aplicar legenda ASS. Veja logs/ass_erro.txt.")
+        _gerar_video_final_com_audio(pasta_projeto, video_para_audio, saida, exigir_audio=modo_narrado)
     except RuntimeError as exc:
         _registrar_erro_montagem(
             pasta_projeto,
@@ -138,7 +154,16 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
         ) from exc
 
     atualizar_status(pasta_projeto, status="montado", montagem="concluido")
-    salvar_json(pasta_projeto / "render" / "montagem.json", {"video_final": str(saida), **stats})
+    salvar_json(
+        pasta_projeto / "render" / "montagem.json",
+        {
+            "video_final": str(saida),
+            "legenda_ass": bool(usar_ass),
+            "legenda_ass_aplicada": bool(ass_aplicado),
+            "fallback_pillow_legenda": bool(blocos_srt) or (usar_ass and not ass_aplicado),
+            **stats,
+        },
+    )
     print(f"Midias aprovadas usadas: {stats['midias']}")
     print(f"Cenas com fallback visual: {stats['fallback']}")
     _validar_video_final(saida, audio_narracao, exigir_audio=modo_narrado)
@@ -308,10 +333,10 @@ def _legenda_no_tempo(blocos_srt: list[dict], tempo: float) -> str:
     return ""
 
 
-def _blocos_srt_edge_tts(pasta_projeto: Path) -> list[dict]:
+def _blocos_srt_sincronizada(pasta_projeto: Path) -> list[dict]:
     fonte = pasta_projeto / "legendas" / "fonte_legenda.txt"
     legenda = pasta_projeto / "legendas" / "legenda.srt"
-    if not fonte.exists() or "edge-tts" not in fonte.read_text(encoding="utf-8", errors="replace"):
+    if not fonte.exists() or fonte.read_text(encoding="utf-8", errors="replace").strip() not in {"stable-ts", "edge-tts"}:
         return []
     return ler_srt(legenda)
 
@@ -325,18 +350,17 @@ def _audio_narracao(pasta_projeto: Path) -> Path | None:
 
 
 def _modo_narrado(pasta_projeto: Path) -> bool:
-    return (pasta_projeto / "roteiro" / "roteiro_narrado.txt").exists() or _fonte_legenda_edge_tts(pasta_projeto)
+    return (pasta_projeto / "roteiro" / "roteiro_narrado.txt").exists() or _fonte_legenda_sincronizada(pasta_projeto)
 
 
-def _fonte_legenda_edge_tts(pasta_projeto: Path) -> bool:
-    fonte = pasta_projeto / "legendas" / "fonte_legenda.txt"
-    return fonte.exists() and "edge-tts" in fonte.read_text(encoding="utf-8", errors="replace")
+def _fonte_legenda_sincronizada(pasta_projeto: Path) -> bool:
+    return fonte_legenda(pasta_projeto) in {"stable-ts", "edge-tts"}
 
 
 def _mensagem_audio_narrado_ausente(pasta_projeto: Path) -> str:
-    if _fonte_legenda_edge_tts(pasta_projeto):
+    if _fonte_legenda_sincronizada(pasta_projeto):
         return (
-            "ERRO: legenda sincronizada edge-tts existe, mas audio/narracao.mp3 nao foi encontrado. Rode:\n"
+            "ERRO: legenda sincronizada existe, mas audio/narracao.mp3 nao foi encontrado. Rode:\n"
             f"python main.py narracao --projeto {pasta_projeto.name}"
         )
     return (
@@ -427,6 +451,54 @@ def _ffprobe_valor(args: list[str]) -> str | None:
     return resultado.stdout.strip()
 
 
+def _legenda_ass(pasta_projeto: Path) -> Path | None:
+    ass = pasta_projeto / "legendas" / "legenda.ass"
+    if ass.exists() and ass.stat().st_size > 0:
+        return ass
+    srt = pasta_projeto / "legendas" / "legenda.srt"
+    if legenda_sincronizada(pasta_projeto) and srt.exists():
+        return gerar_ass_de_srt(pasta_projeto, srt)
+    return None
+
+
+def _aplicar_legenda_ass(pasta_projeto: Path, entrada: Path, ass_path: Path, saida: Path) -> None:
+    filtro = f"ass='{_ffmpeg_filter_path(ass_path)}'"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(entrada),
+        "-vf",
+        filtro,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(saida),
+    ]
+    try:
+        executar(cmd, pasta_projeto / "logs" / "ass_erro.txt", etapa="aplicar_legenda_ass", timeout=120)
+        _validar_video_gerado(saida, cmd=cmd)
+        print("Legenda ASS aplicada com libass")
+    except RuntimeError as exc:
+        (pasta_projeto / "logs" / "ass_erro.txt").write_text(str(exc), encoding="utf-8")
+        raise
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+    texto = str(path.resolve()).replace("\\", "/")
+    texto = texto.replace(":", r"\:")
+    texto = texto.replace("'", r"\'")
+    return texto
+
+
 def criar_imagem_cena(
     cena: dict,
     caminho_saida: Path,
@@ -450,7 +522,9 @@ def criar_imagem_cena(
     cena_id = int(cena["id"])
     titulo = _encurtar(tema, 48)
     texto_principal = _texto_visual_cena(cena)
-    if "legenda_visual" in cena:
+    if cena.get("sem_legenda_visual"):
+        legenda = ""
+    elif "legenda_visual" in cena:
         legenda = _encurtar(cena.get("legenda_visual") or "", 150)
     else:
         legenda = _encurtar(cena.get("legenda_curta") or cena.get("narracao") or "", 150)
@@ -610,13 +684,7 @@ def _quebrar_texto_limitado(texto: str, fonte, largura_maxima: int, max_linhas: 
     linhas = quebrar_texto(texto, fonte, largura_maxima)
     if len(linhas) <= max_linhas:
         return linhas
-
-    linhas_limitadas = linhas[:max_linhas]
-    ultima = linhas_limitadas[-1]
-    while ultima and _medir_texto(ultima + "...", fonte) > largura_maxima:
-        ultima = ultima.rsplit(" ", 1)[0] if " " in ultima else ultima[:-1]
-    linhas_limitadas[-1] = (ultima.rstrip() + "...") if ultima else "..."
-    return linhas_limitadas
+    return linhas[:max_linhas]
 
 
 def _preparar_background_imagem(path: Path):
@@ -674,9 +742,7 @@ def _text_bbox(draw, texto: str, fonte) -> tuple[int, int, int, int]:
 
 def _encurtar(texto: str, limite: int) -> str:
     texto = " ".join((texto or "").split())
-    if len(texto) <= limite:
-        return texto
-    return texto[: limite - 3].rstrip() + "..."
+    return texto
 
 
 def _tema_projeto(pasta_projeto: Path) -> str:

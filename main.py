@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
 
+from src.alinhamento import alinhar_legenda
 from src.cenas import gerar_cenas, gerar_cenas_projeto
 from src.curador_midia import verificar_midias
-from src.legendas import duracao_srt, gerar_legendas, ler_srt
+from src.legendas import duracao_srt, fonte_legenda, gerar_legendas, ler_srt
 from src.montador import montar_video
 from src.narracao import gerar_narracao, gerar_teste_voz, listar_vozes
 from src.pacote_postagem import gerar_pacote
@@ -16,7 +18,9 @@ from src.roteiro import gerar_roteiro, gerar_roteiro_projeto
 from src.utils import (
     carregar_json,
     criar_estrutura_projeto,
+    ambiente_utf8,
     ffprobe_disponivel,
+    normalizar_texto_portugues,
     obter_duracao_midia,
     projeto_path,
     slugify,
@@ -68,6 +72,23 @@ def cmd_narracao(args: argparse.Namespace) -> None:
     gerar_narracao(BASE_DIR, pasta)
 
 
+def cmd_alinhar(args: argparse.Namespace) -> None:
+    pasta = projeto_path(BASE_DIR, args.projeto)
+    alinhar_legenda(BASE_DIR, pasta)
+
+
+def cmd_testar_texto(args: argparse.Namespace) -> None:
+    texto = "força, coração, ação, munição, pressão, histórico, público, revólver, não, então"
+    destino = BASE_DIR / "saida" / "testes" / "texto_portugues.txt"
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(texto + "\n", encoding="utf-8")
+    lido = normalizar_texto_portugues(destino.read_text(encoding="utf-8"))
+    print(f"Arquivo: {destino}")
+    print(lido)
+    for palavra in ["força", "coração", "ação", "munição", "revólver"]:
+        print(f"{palavra}: {'preservado' if palavra in lido else 'PERDIDO'}")
+
+
 def cmd_vozes(args: argparse.Namespace) -> None:
     print("Vozes sugeridas para curiosidade_narrada:")
     for voz in listar_vozes():
@@ -81,14 +102,22 @@ def cmd_testar_voz(args: argparse.Namespace) -> None:
 def cmd_diagnostico(args: argparse.Namespace) -> None:
     pasta = projeto_path(BASE_DIR, args.projeto)
     audio = _audio_oficial(pasta)
+    roteiro = pasta / "roteiro" / "roteiro_narrado.txt"
     legenda = pasta / "legendas" / "legenda.srt"
+    legenda_ass = pasta / "legendas" / "legenda.ass"
     legenda_pacote = pasta / "pacote_postagem" / "legenda.srt"
     video = pasta / "pacote_postagem" / "video_final.mp4"
+    montagem = pasta / "render" / "montagem.json"
 
     print(f"Projeto: {pasta}")
+    print(f"Projeto existe: {_sim_nao(pasta.exists())}")
+    print(f"roteiro/roteiro_narrado.txt: {_status_arquivo(roteiro)}")
+    print(f"Roteiro preserva acentos: {_sim_nao(_texto_tem_acentos(roteiro))}")
     print(f"audio/narracao.mp3: {_status_arquivo(pasta / 'audio' / 'narracao.mp3')}")
     print(f"audio/narracao.wav: {_status_arquivo(pasta / 'audio' / 'narracao.wav')}")
+    print(f"Caminho do audio: {audio if audio else 'nao encontrado'}")
     print(f"legendas/legenda.srt: {_status_arquivo(legenda)}")
+    print(f"legendas/legenda.ass: {_status_arquivo(legenda_ass)}")
     print(f"pacote_postagem/legenda.srt: {_status_arquivo(legenda_pacote)}")
     print(f"pacote_postagem/video_final.mp4: {_status_arquivo(video)}")
 
@@ -119,7 +148,19 @@ def cmd_diagnostico(args: argparse.Namespace) -> None:
     blocos_srt = ler_srt(legenda)
     print(f"Blocos SRT: {len(blocos_srt)}")
     print(f"Duração total do SRT: {_fmt_duracao(duracao_srt(blocos_srt))}")
-    if fonte_texto != "edge-tts":
+    print(f"Fonte normalizada da legenda: {fonte_legenda(pasta) or 'nao informada'}")
+    print(f"Legenda preserva acentos: {_sim_nao(_texto_tem_acentos(legenda))}")
+    print(f"Legenda ASS existe: {_sim_nao(legenda_ass.exists() and legenda_ass.stat().st_size > 0)}")
+    print(f"Legenda contem reticencias: {_sim_nao(_texto_contem_reticencias(legenda) or _texto_contem_reticencias(legenda_ass))}")
+    if _texto_contem_reticencias(legenda) or _texto_contem_reticencias(legenda_ass):
+        print("AVISO: legenda contem reticencias. Verifique se sao do roteiro original ou truncamento indevido.")
+    print(f"Legenda renderizada por ASS/libass: {_sim_nao(_montagem_flag(montagem, 'legenda_ass_aplicada'))}")
+    print(f"Fallback Pillow usado: {_sim_nao(_montagem_flag(montagem, 'fallback_pillow_legenda'))}")
+    if video.exists() and ffprobe_disponivel():
+        resolucao = _resolucao_video(video)
+        print(f"Resolucao do video: {resolucao or 'indisponivel'}")
+        print(f"Video 1080x1920: {_sim_nao(resolucao == '1080x1920')}")
+    if fonte_texto not in {"stable-ts", "edge-tts"}:
         print("AVISO: usando legenda estimada, nao sincronizada pelo edge-tts.")
         print("AVISO: legenda visual sera renderizada por cena ou fallback, nao por bloco SRT.")
     else:
@@ -171,7 +212,7 @@ def cmd_narrado(args: argparse.Namespace) -> None:
     gerar_narracao(BASE_DIR, pasta)
     if _projeto_narrado(pasta) and not _audio_oficial(pasta):
         raise SystemExit(_mensagem_audio_narrado_ausente(pasta))
-    gerar_legendas(pasta)
+    alinhar_legenda(BASE_DIR, pasta)
     montar_video(BASE_DIR, pasta)
     gerar_pacote(pasta)
     print(f"Fluxo narrado finalizado: {pasta / 'pacote_postagem' / 'video_final.mp4'}")
@@ -204,6 +245,13 @@ def build_parser() -> argparse.ArgumentParser:
     narracao = sub.add_parser("narracao", help="Gera narracao com edge-tts e fallback local.")
     narracao.add_argument("--projeto", required=True)
     narracao.set_defaults(func=cmd_narracao)
+
+    alinhar = sub.add_parser("alinhar", help="Alinha audio e roteiro com stable-ts e gera SRT/ASS.")
+    alinhar.add_argument("--projeto", required=True)
+    alinhar.set_defaults(func=cmd_alinhar)
+
+    testar_texto = sub.add_parser("testar-texto", help="Valida preservacao de acentos em UTF-8.")
+    testar_texto.set_defaults(func=cmd_testar_texto)
 
     vozes = sub.add_parser("vozes", help="Lista vozes sugeridas para edge-tts.")
     vozes.set_defaults(func=cmd_vozes)
@@ -246,18 +294,17 @@ def _audio_oficial(pasta: Path) -> Path | None:
 
 
 def _projeto_narrado(pasta: Path) -> bool:
-    return (pasta / "roteiro" / "roteiro_narrado.txt").exists() or _fonte_legenda_edge_tts(pasta)
+    return (pasta / "roteiro" / "roteiro_narrado.txt").exists() or _fonte_legenda_sincronizada(pasta)
 
 
-def _fonte_legenda_edge_tts(pasta: Path) -> bool:
-    fonte = pasta / "legendas" / "fonte_legenda.txt"
-    return fonte.exists() and "edge-tts" in fonte.read_text(encoding="utf-8", errors="replace")
+def _fonte_legenda_sincronizada(pasta: Path) -> bool:
+    return fonte_legenda(pasta) in {"stable-ts", "edge-tts"}
 
 
 def _mensagem_audio_narrado_ausente(pasta: Path) -> str:
-    if _fonte_legenda_edge_tts(pasta):
+    if _fonte_legenda_sincronizada(pasta):
         return (
-            "ERRO: legenda sincronizada edge-tts existe, mas audio/narracao.mp3 nao foi encontrado. Rode:\n"
+            "ERRO: legenda sincronizada existe, mas audio/narracao.mp3 nao foi encontrado. Rode:\n"
             f"python main.py narracao --projeto {pasta.name}"
         )
     return (
@@ -283,6 +330,29 @@ def _fmt_duracao(valor: float | None) -> str:
     return f"{valor:.2f}s" if valor is not None else "indisponivel"
 
 
+def _texto_tem_acentos(path: Path) -> bool:
+    if not path.exists():
+        return False
+    texto = path.read_text(encoding="utf-8", errors="replace")
+    return any(ch in texto for ch in "áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ")
+
+
+def _texto_contem_reticencias(path: Path) -> bool:
+    if not path.exists():
+        return False
+    return "..." in path.read_text(encoding="utf-8", errors="replace")
+
+
+def _montagem_flag(path: Path, chave: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        dados = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(dados.get(chave))
+
+
 def _streams_video(video: Path) -> list[str]:
     try:
         resultado = subprocess.run(
@@ -301,6 +371,7 @@ def _streams_video(video: Path) -> list[str]:
             encoding="utf-8",
             errors="replace",
             shell=False,
+            env=ambiente_utf8(),
             timeout=30,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -308,6 +379,36 @@ def _streams_video(video: Path) -> list[str]:
     if resultado.returncode != 0:
         return []
     return [linha.strip() for linha in resultado.stdout.splitlines() if linha.strip()]
+
+
+def _resolucao_video(video: Path) -> str | None:
+    try:
+        resultado = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                str(video),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            env=ambiente_utf8(),
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    if resultado.returncode != 0:
+        return None
+    return resultado.stdout.strip() or None
 
 
 def main() -> int:
