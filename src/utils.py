@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import unicodedata
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class carregar_json:
+    dumps = staticmethod(json.dumps)
+
+
+PROJECT_SUBDIRS = [
+    "midias/aprovadas",
+    "midias/revisar",
+    "midias/precisa_autorizacao",
+    "midias/rejeitadas",
+    "links_sugeridos",
+    "licencas",
+    "audio",
+    "legendas",
+    "render",
+    "pacote_postagem",
+    "logs",
+]
+
+
+def slugify(texto: str) -> str:
+    normalized = unicodedata.normalize("NFKD", texto)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_text = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_text).strip("_").lower()
+    return ascii_text or "projeto_sem_titulo"
+
+
+def projeto_path(base_dir: Path, nome: str) -> Path:
+    pasta = base_dir / "projetos" / nome
+    if not pasta.exists():
+        raise FileNotFoundError(pasta)
+    return pasta
+
+
+def criar_estrutura_projeto(base_dir: Path, nome: str, nicho: str, tema: str) -> Path:
+    pasta = base_dir / "projetos" / nome
+    pasta.mkdir(parents=True, exist_ok=True)
+    for subdir in PROJECT_SUBDIRS:
+        (pasta / subdir).mkdir(parents=True, exist_ok=True)
+
+    escrever_se_nao_existir(pasta / "tema.txt", tema + "\n")
+    escrever_se_nao_existir(pasta / "midias" / "imagens.txt", "")
+    escrever_se_nao_existir(pasta / "midias" / "videos.txt", "")
+    escrever_se_nao_existir(pasta / "midias" / "referencias.txt", "")
+
+    status_path = pasta / "status.json"
+    if not status_path.exists():
+        salvar_json(
+            status_path,
+            {
+                "projeto": nome,
+                "nicho": nicho,
+                "status": "criado",
+                "etapas": {
+                    "roteiro": "pendente",
+                    "cenas": "pendente",
+                    "midias": "pendente",
+                    "montagem": "pendente",
+                    "pacote": "pendente",
+                },
+            },
+        )
+    return pasta
+
+
+def escrever_se_nao_existir(path: Path, conteudo: str) -> None:
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(conteudo, encoding="utf-8")
+
+
+def carregar_json_arquivo(path: Path, default: Any | None = None) -> Any:
+    if not path.exists():
+        if default is not None:
+            return default
+        raise FileNotFoundError(path)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def salvar_json(path: Path, dados: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def atualizar_status(pasta_projeto: Path, status: str | None = None, **etapas: str) -> None:
+    status_path = pasta_projeto / "status.json"
+    dados = carregar_json_arquivo(status_path)
+    if status:
+        dados["status"] = status
+    for etapa, valor in etapas.items():
+        if etapa in dados.get("etapas", {}):
+            dados["etapas"][etapa] = valor
+    salvar_json(status_path, dados)
+
+
+def copiar_arquivo(origem: Path, destino_dir: Path) -> Path:
+    destino_dir.mkdir(parents=True, exist_ok=True)
+    destino = destino_dir / origem.name
+    if destino.exists():
+        stem = destino.stem
+        suffix = destino.suffix
+        destino = destino_dir / f"{stem}_{datetime.now().strftime('%Y%m%d%H%M%S')}{suffix}"
+    shutil.copy2(origem, destino)
+    return destino
+
+
+def ffmpeg_disponivel() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def ffprobe_disponivel() -> bool:
+    return shutil.which("ffprobe") is not None
+
+
+def executar(
+    cmd: list[str],
+    log_path: Path | None = None,
+    etapa: str | None = None,
+    cena_id: int | str | None = None,
+) -> None:
+    resultado = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", shell=False)
+    if resultado.returncode != 0:
+        partes = [
+            "Etapa:",
+            etapa or "nao informada",
+            "",
+            "Cena:",
+            str(cena_id) if cena_id is not None else "nao informada",
+            "",
+            "Comando executado:",
+            " ".join(cmd),
+            "",
+            "STDOUT:",
+            resultado.stdout.strip(),
+            "",
+            "STDERR:",
+            resultado.stderr.strip(),
+        ]
+        mensagem = "\n".join(partes).strip()
+        if log_path:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(mensagem, encoding="utf-8")
+        raise RuntimeError(mensagem)

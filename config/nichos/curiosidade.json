@@ -1,0 +1,17 @@
+{
+  "nome": "curiosidade",
+  "duracao_minima": 40,
+  "duracao_maxima": 70,
+  "formato": "1080x1920",
+  "usar_narracao": false,
+  "usar_legenda": true,
+  "usar_musica": false,
+  "risco_maximo_automatico": "PROVAVELMENTE_SEGURA",
+  "plataformas": [
+    "youtube_shorts",
+    "tiktok",
+    "kwai",
+    "instagram_reels",
+    "facebook_reels"
+  ]
+}

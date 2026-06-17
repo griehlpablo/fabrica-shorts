@@ -1,0 +1,2 @@
+# FFmpeg deve ser instalado separadamente e adicionado ao PATH.
+Pillow>=10.0.0
