@@ -55,14 +55,20 @@ def _montar_plano_midias(pasta_projeto: Path, plano_visual: list[dict], catalogo
     fontes_registro = []
     for cena in plano_visual:
         candidatos = [_avaliar_candidato(cena, item, usados, anterior) for item in catalogo]
+        rejeitados_termo = [c for c in candidatos if _tem_termo_evitado(cena, c)]
         candidatos = [c for c in candidatos if c["status"] not in STATUS_BLOQUEADOS and not _tem_termo_evitado(cena, c)]
         candidatos.sort(key=lambda item: item["score"], reverse=True)
-        escolhido = candidatos[0] if candidatos and candidatos[0]["score"] > 0 else None
+        escolhido = _escolher_candidato(candidatos)
         fallback_usado = escolhido is None
+        reutilizacao_controlada = bool(escolhido and escolhido.get("reutilizacao_controlada"))
         if escolhido:
             usados.add(escolhido["arquivo"])
             anterior = escolhido["arquivo"]
             fontes_registro.append(_fonte_de_candidato(cena, escolhido))
+        layout_texto = _layout_texto(cena)
+        fallback_estilo = _fallback_estilo(cena)
+        motivo_score_baixo = _motivo_score_baixo(cena, candidatos, rejeitados_termo, escolhido, catalogo)
+        motivo_fallback = _motivo_fallback(cena, candidatos, rejeitados_termo, catalogo) if fallback_usado else ""
         item = {
             "cena_id": cena["cena_id"],
             "texto_tela": cena["texto_tela"],
@@ -81,11 +87,34 @@ def _montar_plano_midias(pasta_projeto: Path, plano_visual: list[dict], catalogo
             "provedor": escolhido["provedor"] if escolhido else "fallback",
             "licenca": escolhido["licenca"] if escolhido else "gerado localmente",
             "fallback_usado": fallback_usado,
+            "fallback_estilo": fallback_estilo if fallback_usado else "",
+            "layout_texto": layout_texto,
+            "texto_caixa": _tipo_caixa_texto(layout_texto),
+            "motivo_score_baixo": motivo_score_baixo,
+            "motivo_fallback": motivo_fallback,
+            "sugestoes_de_busca_pt": cena.get("palavras_chave_pt", [])[:5],
+            "sugestoes_de_busca_en": cena.get("palavras_chave_en", [])[:5],
+            "tipo_de_midia_recomendada": cena.get("tipo_de_midia_ideal", [])[:4],
+            "reutilizacao_controlada": reutilizacao_controlada,
             "status": "fallback" if fallback_usado else "selecionada",
         }
         plano.append(item)
     _atualizar_fontes_usadas(pasta_projeto, fontes_registro)
     return plano
+
+
+def _escolher_candidato(candidatos: list[dict]) -> dict | None:
+    if not candidatos:
+        return None
+    for candidato in candidatos:
+        if candidato["score"] > 0 and not candidato.get("repeticao_consecutiva"):
+            return candidato
+    for candidato in candidatos:
+        if candidato["score"] > -25 and not candidato.get("repeticao_consecutiva"):
+            candidato["reutilizacao_controlada"] = bool(candidato.get("ja_usado"))
+            candidato["motivo"] += "; reutilizacao controlada por falta de alternativa melhor"
+            return candidato
+    return None
 
 
 def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str | None) -> dict:
@@ -106,7 +135,9 @@ def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str |
     if item.get("orientacao") == "vertical":
         qualidade += 8
     licenca = 12 if item.get("status") == "aprovado" else -4 if item.get("status") == "local_sem_licenca" else 0
-    diversidade = -80 if item["arquivo"] == anterior else -30 if item["arquivo"] in usados else 0
+    repeticao_consecutiva = item["arquivo"] == anterior
+    ja_usado = item["arquivo"] in usados
+    diversidade = -80 if repeticao_consecutiva else -18 if ja_usado else 0
     penalidade = -60 if _tem_termo_evitado(cena, item) else 0
     score = relevancia + tipo + qualidade + licenca + diversidade + penalidade
     motivos = []
@@ -130,8 +161,74 @@ def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str |
         "motivo": "; ".join(motivos) or "baixa correspondencia",
         "tags": item.get("tags", []),
         "orientacao": item.get("orientacao"),
+        "ja_usado": ja_usado,
+        "repeticao_consecutiva": repeticao_consecutiva,
     }
     return candidato
+
+
+def _layout_texto(cena: dict) -> str:
+    funcao = str(cena.get("funcao_narrativa", "contexto"))
+    cena_id = int(cena.get("cena_id", 1))
+    if funcao == "gancho":
+        return "centro_sem_caixa"
+    if funcao == "cultura_pop":
+        return "topo_cinematografico"
+    if funcao == "mito_vs_realidade":
+        return "centro_alto"
+    if funcao == "explicacao":
+        return "topo_com_stroke"
+    if funcao == "contraste":
+        return "centro_alto" if cena_id % 2 else "topo_com_stroke"
+    if funcao == "fechamento":
+        return "fechamento_central"
+    return "centro_alto" if cena_id % 2 else "topo_com_stroke"
+
+
+def _tipo_caixa_texto(layout: str) -> str:
+    if layout in {"topo_com_stroke", "topo_cinematografico"}:
+        return "caixa_pequena"
+    return "sem_caixa"
+
+
+def _fallback_estilo(cena: dict) -> str:
+    funcao = str(cena.get("funcao_narrativa", "contexto"))
+    mapa = {
+        "gancho": "documental_escuro",
+        "cultura_pop": "cinema_dourado",
+        "mito_vs_realidade": "contraste_vermelho_escuro",
+        "explicacao": "explicativo_azul_petroleo",
+        "contraste": "contraste_vermelho_escuro",
+        "fechamento": "fechamento_preto_vinheta",
+    }
+    return mapa.get(funcao, "documental_escuro")
+
+
+def _motivo_score_baixo(cena: dict, candidatos: list[dict], rejeitados_termo: list[dict], escolhido: dict | None, catalogo: list[dict]) -> str:
+    score = float(escolhido.get("score", 0)) if escolhido else 0
+    if score >= 15:
+        return ""
+    if not catalogo:
+        return "Biblioteca local vazia ou sem arquivos de imagem/video compatíveis."
+    if not candidatos and rejeitados_termo:
+        return "Candidatos encontrados foram penalizados por termos evitados."
+    if not candidatos:
+        return "Nenhuma mídia local compatível encontrada para as palavras-chave da cena."
+    if any(c.get("repeticao_consecutiva") for c in candidatos[:3]):
+        return "Melhores candidatos causariam repetição consecutiva."
+    if not any(c.get("tipo") == "video" for c in candidatos) and "video_curto" in cena.get("tipo_de_midia_ideal", []):
+        return "Cena pede vídeo/B-roll, mas nenhum vídeo local adequado foi encontrado."
+    return "Candidatos têm baixa correspondência textual com a intenção visual da cena."
+
+
+def _motivo_fallback(cena: dict, candidatos: list[dict], rejeitados_termo: list[dict], catalogo: list[dict]) -> str:
+    if not catalogo:
+        return "Biblioteca local insuficiente e APIs externas não configuradas ou sem resultado."
+    if rejeitados_termo and not candidatos:
+        return "Mídias candidatas continham termos evitados."
+    if not candidatos:
+        return "Nenhuma mídia local razoável para a cena."
+    return "Candidatos disponíveis ficaram abaixo do score mínimo após penalidades de tipo, relevância ou repetição."
 
 
 def _catalogar_arquivo(arquivo: Path, rel: str, origem: dict | None) -> dict:

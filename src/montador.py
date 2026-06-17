@@ -54,6 +54,9 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
                     "funcao_narrativa": item.get("funcao_narrativa") or item.get("intencao_visual"),
                     "prioridade_visual": item.get("prioridade_visual", 5),
                     "fallback_variante": item.get("cena_id", cena.get("id")),
+                    "layout_texto": item.get("layout_texto", "centro_alto"),
+                    "texto_caixa": item.get("texto_caixa", "sem_caixa"),
+                    "fallback_estilo": item.get("fallback_estilo", ""),
                 }
             )
         try:
@@ -590,7 +593,7 @@ def criar_imagem_cena(
         _desenhar_textura_sutil(draw, cena_id)
 
     _desenhar_topo(draw, titulo, fonte_categoria, fonte_topo, fonte_pequena, cena_id, total_cenas)
-    _desenhar_caixa_texto(draw, texto_principal, fonte_principal, centro_y=835, largura=WIDTH - 160)
+    _desenhar_texto_tela_dinamico(draw, texto_principal, fonte_principal, cena)
     _desenhar_legenda(draw, legenda, fonte_legenda)
     _desenhar_progresso(draw, cena_id, total_cenas)
 
@@ -636,18 +639,47 @@ def _fonte_para_linhas(texto: str, largura: int, max_linhas: int, tamanho_max: i
     return _carregar_fonte(tamanho_min)
 
 
-def _desenhar_caixa_texto(draw, texto: str, fonte, centro_y: int, largura: int) -> None:
+def _desenhar_texto_tela_dinamico(draw, texto: str, fonte, cena: dict) -> None:
+    layout = cena.get("layout_texto") or _layout_texto_padrao(cena)
+    largura = WIDTH - 170
+    if layout in {"topo_com_stroke", "topo_cinematografico"}:
+        centro_y = 520
+    elif layout == "centro_sem_caixa":
+        centro_y = 770
+    elif layout == "fechamento_central":
+        centro_y = 860
+    else:
+        centro_y = 705 if int(cena.get("id", 1)) % 2 else 790
+    _desenhar_caixa_texto(draw, texto, fonte, centro_y=centro_y, largura=largura, layout=layout, caixa=cena.get("texto_caixa", "sem_caixa"))
+
+
+def _layout_texto_padrao(cena: dict) -> str:
+    funcao = str(cena.get("funcao_narrativa", ""))
+    if "cultura" in funcao:
+        return "topo_cinematografico"
+    if "explic" in funcao:
+        return "topo_com_stroke"
+    if "fechamento" in funcao:
+        return "fechamento_central"
+    return "centro_alto"
+
+
+def _desenhar_caixa_texto(draw, texto: str, fonte, centro_y: int, largura: int, layout: str = "centro_alto", caixa: str = "sem_caixa") -> None:
     linhas = _quebrar_texto_limitado(texto, fonte, largura, max_linhas=2)
-    espacamento = 24
+    espacamento = 18
     altura_total = _altura_linhas(draw, linhas, fonte, espacamento)
     y = centro_y - altura_total // 2
-    caixa = (70, y - 62, WIDTH - 70, y + altura_total + 62)
-    draw.rounded_rectangle(caixa, radius=10, fill=(0, 0, 0, 118), outline=(255, 255, 255, 34), width=2)
-    draw.rectangle((90, caixa[1] + 18, 101, caixa[3] - 18), fill=(250, 204, 21, 210))
+    if caixa == "caixa_pequena":
+        max_largura = max(_medir_texto(linha, fonte) for linha in linhas)
+        x1 = max(70, (WIDTH - max_largura) // 2 - 34)
+        x2 = min(WIDTH - 70, (WIDTH + max_largura) // 2 + 34)
+        rect = (x1, y - 24, x2, y + altura_total + 24)
+        draw.rounded_rectangle(rect, radius=8, fill=(0, 0, 0, 96), outline=(255, 255, 255, 22), width=1)
     for linha in linhas:
         bbox = _text_bbox(draw, linha, fonte)
         x = (WIDTH - (bbox[2] - bbox[0])) // 2
-        _desenhar_texto_com_sombra(draw, (x, y), linha, fonte, fill=(255, 255, 255), shadow_offset=5)
+        cor = (255, 244, 178) if layout in {"mito_vs_realidade", "centro_sem_caixa", "fechamento_central"} else (255, 255, 255)
+        _desenhar_texto_stroke(draw, (x, y), linha, fonte, fill=cor, stroke_width=4, shadow_offset=4)
         y += (bbox[3] - bbox[1]) + espacamento
 
 
@@ -707,6 +739,27 @@ def _desenhar_texto_com_sombra(
     draw.text((x, y), texto, fill=fill, font=fonte)
 
 
+def _desenhar_texto_stroke(
+    draw,
+    pos: tuple[int, int],
+    texto: str,
+    fonte,
+    fill: tuple[int, int, int] = (255, 255, 255),
+    stroke_width: int = 3,
+    shadow_offset: int = 3,
+) -> None:
+    x, y = pos
+    draw.text(
+        (x + shadow_offset, y + shadow_offset),
+        texto,
+        fill=(0, 0, 0, 150),
+        font=fonte,
+        stroke_width=stroke_width,
+        stroke_fill=(0, 0, 0, 160),
+    )
+    draw.text((x, y), texto, fill=fill, font=fonte, stroke_width=stroke_width, stroke_fill=(0, 0, 0, 230))
+
+
 def desenhar_caixa_texto(draw, texto: str, fonte, centro_y: int = 875, largura: int = 880) -> None:
     _desenhar_caixa_texto(draw, texto, fonte, centro_y, largura)
 
@@ -759,21 +812,56 @@ def _criar_gradiente_escuro(cena: dict | None = None):
     imagem = Image.new("RGBA", (WIDTH, HEIGHT))
     draw = ImageDraw.Draw(imagem)
     cena_id = int((cena or {}).get("id", 1))
-    paletas = [
-        ((8, 14, 28), (20, 36, 80)),
-        ((12, 12, 18), (44, 28, 54)),
-        ((10, 18, 18), (18, 58, 52)),
-        ((16, 14, 10), (58, 44, 22)),
-        ((9, 12, 20), (42, 48, 62)),
-    ]
-    topo, base = paletas[cena_id % len(paletas)]
+    estilo = (cena or {}).get("fallback_estilo") or _fallback_estilo_padrao(cena or {})
+    paletas = {
+        "documental_escuro": ((7, 9, 14), (34, 38, 48)),
+        "cinema_dourado": ((12, 10, 8), (76, 55, 24)),
+        "contraste_vermelho_escuro": ((10, 7, 10), (64, 20, 26)),
+        "explicativo_azul_petroleo": ((6, 15, 18), (18, 70, 78)),
+        "fechamento_preto_vinheta": ((2, 2, 4), (22, 22, 28)),
+    }
+    topo, base = paletas.get(estilo, paletas["documental_escuro"])
     for y in range(HEIGHT):
         t = y / max(HEIGHT - 1, 1)
         r = int(topo[0] * (1 - t) + base[0] * t)
         g = int(topo[1] * (1 - t) + base[1] * t)
         b = int(topo[2] * (1 - t) + base[2] * t)
         draw.line((0, y, WIDTH, y), fill=(r, g, b, 255))
+    _aplicar_vinheta_e_grain(imagem, cena_id)
     return imagem
+
+
+def _fallback_estilo_padrao(cena: dict) -> str:
+    funcao = str(cena.get("funcao_narrativa", ""))
+    if "cultura" in funcao:
+        return "cinema_dourado"
+    if "mito" in funcao or "contraste" in funcao:
+        return "contraste_vermelho_escuro"
+    if "explic" in funcao:
+        return "explicativo_azul_petroleo"
+    if "fechamento" in funcao:
+        return "fechamento_preto_vinheta"
+    return "documental_escuro"
+
+
+def _aplicar_vinheta_e_grain(imagem, seed: int) -> None:
+    Image, ImageDraw, _, ImageFilter = _pillow()
+    vinheta = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(vinheta)
+    for i in range(18):
+        alpha = int(7 + i * 5)
+        margem_x = int(i * WIDTH / 55)
+        margem_y = int(i * HEIGHT / 55)
+        draw.rectangle((margem_x, margem_y, WIDTH - margem_x, HEIGHT - margem_y), outline=(0, 0, 0, alpha), width=18)
+    imagem.alpha_composite(vinheta.filter(ImageFilter.GaussianBlur(18)))
+    grain = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(grain)
+    for i in range(900):
+        x = (i * 37 + seed * 53) % WIDTH
+        y = (i * 91 + seed * 29) % HEIGHT
+        val = 255 if i % 3 else 0
+        gdraw.point((x, y), fill=(val, val, val, 14))
+    imagem.alpha_composite(grain)
 
 
 def _carregar_fonte(tamanho: int):

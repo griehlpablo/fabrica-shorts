@@ -381,6 +381,10 @@ def _diagnostico_visual_direitos(pasta: Path) -> None:
     print(f"fontes_midias.json existe: {_sim_nao(fontes.exists())}")
     plano = carregar_json_arquivo(plano_midias, default=[])
     registros = carregar_json_arquivo(fontes, default=[])
+    base_dir = BASE_DIR
+    videos_locais = _contar_midias_dir(base_dir / "biblioteca" / "videos", {".mp4", ".mov", ".mkv", ".webm"})
+    imagens_locais = _contar_midias_dir(base_dir / "biblioteca" / "imagens", {".jpg", ".jpeg", ".png", ".webp", ".bmp"})
+    fundos_locais = _contar_midias_dir(base_dir / "biblioteca" / "fundos", {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm"})
     usadas = [item.get("midia_selecionada") for item in plano if item.get("midia_selecionada")]
     unicas = set(usadas)
     repeticao_consecutiva = any(usadas[i] == usadas[i - 1] for i in range(1, len(usadas)))
@@ -398,6 +402,34 @@ def _diagnostico_visual_direitos(pasta: Path) -> None:
     sem_licenca = max(sem_licenca, sum(1 for item in plano if item.get("provedor") == "Local" and not item.get("licenca")))
     print(f"Midias sem licenca: {sem_licenca}")
     print(f"Midias para revisar: {sum(1 for item in registros if item.get('status') == 'revisar')}")
+    print("Visual V3.1:")
+    caixas = _contar_por_chave(plano, "texto_caixa")
+    layouts = _contar_por_chave(plano, "layout_texto")
+    print(f"- Textos com caixa grande: {caixas.get('caixa_grande', 0)}")
+    print(f"- Textos sem caixa: {caixas.get('sem_caixa', 0)}")
+    print(f"- Textos com caixa pequena: {caixas.get('caixa_pequena', 0)}")
+    print(f"- Layouts usados: {', '.join(layouts.keys()) if layouts else 'nenhum'}")
+    fallback_cenas = [str(item.get("cena_id")) for item in plano if item.get("fallback_usado")]
+    print(f"- Fallbacks usados: cenas {', '.join(fallback_cenas) if fallback_cenas else 'nenhuma'}")
+    estilos = sorted({item.get("fallback_estilo") for item in plano if item.get("fallback_estilo")})
+    print(f"- Estilos de fallback: {', '.join(estilos) if estilos else 'nenhum'}")
+    print(f"- Videos locais encontrados: {videos_locais}")
+    print(f"- Imagens locais encontradas: {imagens_locais}")
+    print(f"- Fundos locais encontrados: {fundos_locais}")
+    if videos_locais == 0:
+        print("- Nenhum video local encontrado.")
+    for item in plano:
+        if item.get("fallback_usado"):
+            print(f"- Cena {item.get('cena_id')} fallback: {item.get('motivo_fallback') or 'sem motivo registrado'}")
+            print(f"  Sugestoes PT: {', '.join(item.get('sugestoes_de_busca_pt', [])[:4])}")
+            print(f"  Sugestoes EN: {', '.join(item.get('sugestoes_de_busca_en', [])[:4])}")
+        if float(item.get("score", 0)) < 15:
+            print(f"- Cena {item.get('cena_id')} score baixo: {item.get('motivo_score_baixo') or 'sem motivo registrado'}")
+    if any(item.get("reutilizacao_controlada") for item in plano):
+        cenas = [str(item.get("cena_id")) for item in plano if item.get("reutilizacao_controlada")]
+        print(f"- Reutilizacao controlada de midia: cenas {', '.join(cenas)}")
+    elif videos_locais and not any(_tipo_midia_plano(item) == "video" for item in plano):
+        print("- Video local encontrado mas nao usado: score menor que imagens ou penalidade de relevancia/repeticao.")
     scores = [float(item.get("score", 0)) for item in plano]
     media_score = sum(scores) / len(scores) if scores else 0
     print(f"Score medio das midias: {media_score:.1f}")
@@ -411,6 +443,22 @@ def _diagnostico_visual_direitos(pasta: Path) -> None:
         print("AVISO: midia local sem licenca registrada.")
     if any(item.get("fallback_usado") for item in plano):
         print("AVISO: fallback visual usado em uma ou mais cenas.")
+
+
+def _contar_midias_dir(path: Path, extensoes: set[str]) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for arquivo in path.rglob("*") if arquivo.is_file() and arquivo.suffix.lower() in extensoes)
+
+
+def _contar_por_chave(itens: list[dict], chave: str) -> dict[str, int]:
+    resultado: dict[str, int] = {}
+    for item in itens:
+        valor = str(item.get(chave) or "")
+        if not valor:
+            continue
+        resultado[valor] = resultado.get(valor, 0) + 1
+    return resultado
 
 
 def _tipo_midia_plano(item: dict) -> str:
