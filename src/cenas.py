@@ -43,10 +43,10 @@ TEXTOS_VISUAIS = [
 
 
 def gerar_cenas(roteiro: str, tema: str) -> list[dict]:
-    partes = _partes_narracao(roteiro, alvo=7)
+    partes = _partes_narracao(roteiro, alvo=8)
     quantidade = max(6, min(9, len(partes)))
     partes = partes[:quantidade]
-    duracao_por_cena = max(4, min(8, ceil(56 / quantidade)))
+    duracao_por_cena = max(4, min(7, ceil(48 / quantidade)))
 
     cenas = []
     inicio = 0
@@ -60,6 +60,7 @@ def gerar_cenas(roteiro: str, tema: str) -> list[dict]:
                 "duracao": duracao,
                 "narracao": narracao,
                 "texto_tela": _texto_tela(idx, tema, palavras),
+                "legenda_curta": _legenda_curta(narracao),
                 "midia_necessaria": f"Imagem ou video relacionado a {', '.join(palavras[:3])}",
                 "palavras_chave": palavras,
                 "tipo_midia": "imagem" if idx % 3 else "video",
@@ -67,6 +68,27 @@ def gerar_cenas(roteiro: str, tema: str) -> list[dict]:
             }
         )
         inicio += duracao
+    return cenas
+
+
+def gerar_cenas_projeto(pasta_projeto, tema: str | None = None) -> list[dict]:
+    from pathlib import Path
+
+    from src.utils import carregar_json, atualizar_status
+
+    pasta = Path(pasta_projeto)
+    tema_final = tema or (pasta / "tema.txt").read_text(encoding="utf-8").strip()
+    roteiro_path = pasta / "roteiro" / "roteiro_narrado.txt"
+    if not roteiro_path.exists():
+        roteiro_path = pasta / "roteiro.txt"
+    roteiro = roteiro_path.read_text(encoding="utf-8").strip()
+    cenas = gerar_cenas(roteiro, tema_final)
+    (pasta / "cenas.json").write_text(
+        carregar_json.dumps(cenas, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    atualizar_status(pasta, cenas="concluido")
+    print("Cenas criadas")
     return cenas
 
 
@@ -125,6 +147,13 @@ def _texto_tela(idx: int, tema: str, palavras: list[str]) -> str:
     if palavras:
         return palavras[0].replace("_", " ").title()
     return "Curiosidade"
+
+
+def _legenda_curta(texto: str) -> str:
+    texto = " ".join(texto.split())
+    if len(texto) <= 95:
+        return texto
+    return texto[:92].rsplit(" ", 1)[0].rstrip() + "..."
 
 
 def _titulo_curto_tema(tema: str) -> str:

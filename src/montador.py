@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import subprocess
 import traceback
 from pathlib import Path
 
-from src.utils import atualizar_status, carregar_json_arquivo, executar, ffmpeg_disponivel, salvar_json
+from src.legendas import ler_srt
+from src.utils import atualizar_status, carregar_json_arquivo, executar, ffmpeg_disponivel, ffprobe_disponivel, salvar_json
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -13,10 +15,20 @@ HEIGHT = 1920
 
 
 def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
+    cenas = carregar_json_arquivo(pasta_projeto / "cenas.json", default=[])
+    audio_narracao = _audio_narracao(pasta_projeto)
+    modo_narrado = _modo_narrado(pasta_projeto)
+    if modo_narrado and not audio_narracao:
+        raise RuntimeError(_mensagem_audio_narrado_ausente(pasta_projeto))
     if not ffmpeg_disponivel():
         raise RuntimeError("FFmpeg nao encontrado. Instale o FFmpeg e adicione ao PATH.")
+    duracao_audio = _duracao_midia(audio_narracao) if audio_narracao else None
+    if duracao_audio and cenas:
+        cenas = _sincronizar_cenas_com_audio(pasta_projeto, cenas, duracao_audio)
+        from src.legendas import gerar_legendas
 
-    cenas = carregar_json_arquivo(pasta_projeto / "cenas.json", default=[])
+        gerar_legendas(pasta_projeto)
+    blocos_srt = _blocos_srt_edge_tts(pasta_projeto)
     plano = carregar_json_arquivo(pasta_projeto / "plano_midias.json", default=[])
     plano_por_cena = {item["cena_id"]: item for item in plano}
     tema = _tema_projeto(pasta_projeto)
@@ -29,23 +41,33 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
 
     for indice, cena in enumerate(cenas, start=1):
         print(f"Renderizando cena {indice}/{len(cenas)}...")
-        segmento = render_dir / f"cena_{int(cena['id']):03}.mp4"
-        _apagar_mp4_vazio(segmento)
         item = plano_por_cena.get(cena["id"], {})
         arquivo_rel = item.get("arquivo_copiado")
         arquivo = pasta_projeto / arquivo_rel if arquivo_rel else None
         arquivo_valido = arquivo if arquivo and arquivo.exists() else None
         try:
-            usou_midia = _renderizar_cena(
-                cena=cena,
-                arquivo=arquivo_valido,
-                saida=segmento,
-                pasta_projeto=pasta_projeto,
-                tema=tema,
-                total_cenas=len(cenas),
-            )
+            if blocos_srt:
+                segmentos_cena, usou_midia = _renderizar_cena_por_blocos_srt(
+                    cena=cena,
+                    arquivo=arquivo_valido,
+                    pasta_projeto=pasta_projeto,
+                    tema=tema,
+                    total_cenas=len(cenas),
+                    blocos_srt=blocos_srt,
+                )
+            else:
+                segmento = render_dir / f"cena_{int(cena['id']):03}.mp4"
+                _apagar_mp4_vazio(segmento)
+                usou_midia = _renderizar_cena(
+                    cena=cena,
+                    arquivo=arquivo_valido,
+                    saida=segmento,
+                    pasta_projeto=pasta_projeto,
+                    tema=tema,
+                    total_cenas=len(cenas),
+                )
+                segmentos_cena = [segmento]
         except RuntimeError as exc:
-            _apagar_mp4_vazio(segmento)
             _registrar_erro_montagem(
                 pasta_projeto,
                 etapa="renderizar_cena",
@@ -57,9 +79,11 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
                 f"Falha ao renderizar a cena {cena.get('id')}. "
                 f"Erro completo salvo em: {pasta_projeto / 'logs' / 'montagem_erro.txt'}"
             ) from exc
+        _validar_segmentos_cena(segmentos_cena)
+        segmento = f"{len(segmentos_cena)} segmentos gerados"
         print(f"Cena {indice} concluída: {segmento}")
         stats["midias" if usou_midia else "fallback"] += 1
-        segmentos.append(segmento)
+        segmentos.extend(segmentos_cena)
 
     lista = render_dir / "concat.txt"
     lista.write_text(
@@ -67,7 +91,10 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
         encoding="utf-8",
     )
 
+    print("Juntando cenas...")
     saida = pasta_projeto / "pacote_postagem" / "video_final.mp4"
+    video_sem_audio = render_dir / "video_sem_audio.mp4"
+    _apagar_mp4_vazio(video_sem_audio)
     saida.parent.mkdir(parents=True, exist_ok=True)
     cmd_concat = [
         "ffmpeg",
@@ -88,7 +115,7 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
         "yuv420p",
         "-movflags",
         "+faststart",
-        str(saida),
+        str(video_sem_audio),
     ]
     try:
         executar(
@@ -96,7 +123,8 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
             pasta_projeto / "logs" / "ffmpeg_concat_erro.log",
             etapa="concatenar_cenas",
         )
-        _validar_video_gerado(saida, cmd=cmd_concat)
+        _validar_video_gerado(video_sem_audio, cmd=cmd_concat)
+        _gerar_video_final_com_audio(pasta_projeto, video_sem_audio, saida, exigir_audio=modo_narrado)
     except RuntimeError as exc:
         _registrar_erro_montagem(
             pasta_projeto,
@@ -113,7 +141,8 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
     salvar_json(pasta_projeto / "render" / "montagem.json", {"video_final": str(saida), **stats})
     print(f"Midias aprovadas usadas: {stats['midias']}")
     print(f"Cenas com fallback visual: {stats['fallback']}")
-    print(f"Video final: {saida}")
+    _validar_video_final(saida, audio_narracao, exigir_audio=modo_narrado)
+    print(f"Vídeo final gerado em: {saida}")
     return saida
 
 
@@ -125,11 +154,10 @@ def _renderizar_cena(
     tema: str,
     total_cenas: int,
 ) -> bool:
-    duracao_int = int(cena.get("duracao", 5))
-    duracao = str(duracao_int)
     cena_id = int(cena["id"])
 
     if arquivo and arquivo.suffix.lower() in VIDEO_EXTS:
+        duracao = f"{_duracao_cena(cena, tem_background=True):.3f}"
         overlay = pasta_projeto / "render" / f"overlay_{cena_id:03}.png"
         criar_imagem_cena(cena, overlay, tema, total_cenas, transparente=True)
         cmd = [
@@ -166,7 +194,8 @@ def _renderizar_cena(
     imagem_cena = pasta_projeto / "render" / f"cena_{cena_id:03}.png"
     background = arquivo if arquivo and arquivo.suffix.lower() in IMAGE_EXTS else None
     criar_imagem_cena(cena, imagem_cena, tema, total_cenas, background=background)
-    frames = duracao_int * 30
+    duracao = _duracao_cena(cena, tem_background=background is not None)
+    frames = max(1, round(duracao * 30))
     cmd = [
         "ffmpeg",
         "-y",
@@ -196,6 +225,208 @@ def _renderizar_cena(
     return background is not None
 
 
+def _duracao_cena(cena: dict, tem_background: bool) -> float:
+    duracao_original = float(cena.get("duracao", 5))
+    if cena.get("duracao_ajustada_por_audio"):
+        return max(0.5, duracao_original)
+    if tem_background:
+        return max(3, min(duracao_original, 5))
+    return 4
+
+
+def _renderizar_cena_por_blocos_srt(
+    cena: dict,
+    arquivo: Path | None,
+    pasta_projeto: Path,
+    tema: str,
+    total_cenas: int,
+    blocos_srt: list[dict],
+) -> tuple[list[Path], bool]:
+    render_dir = pasta_projeto / "render"
+    cena_id = int(cena["id"])
+    segmentos = []
+    usou_midia = False
+
+    for parte_idx, intervalo in enumerate(_intervalos_legenda_cena(cena, blocos_srt), start=1):
+        duracao = max(0.05, intervalo["fim"] - intervalo["inicio"])
+        cena_sub = dict(cena)
+        cena_sub["duracao"] = duracao
+        cena_sub["legenda_visual"] = intervalo["texto"]
+        saida = render_dir / f"cena_{cena_id:03}_{parte_idx:03}.mp4"
+        _apagar_mp4_vazio(saida)
+        usou_midia = _renderizar_cena(
+            cena=cena_sub,
+            arquivo=arquivo,
+            saida=saida,
+            pasta_projeto=pasta_projeto,
+            tema=tema,
+            total_cenas=total_cenas,
+        ) or usou_midia
+        segmentos.append(saida)
+
+    return segmentos, usou_midia
+
+
+def _validar_segmentos_cena(segmentos_cena: list[Path]) -> None:
+    if not segmentos_cena:
+        raise RuntimeError("Nenhum segmento foi gerado para a cena.")
+    for segmento in segmentos_cena:
+        _validar_video_gerado(segmento)
+
+
+def _intervalos_legenda_cena(cena: dict, blocos_srt: list[dict]) -> list[dict]:
+    inicio_cena = float(cena.get("inicio_estimado", 0))
+    fim_cena = inicio_cena + float(cena.get("duracao", 5))
+    pontos = [inicio_cena, fim_cena]
+    for bloco in blocos_srt:
+        inicio = float(bloco["inicio"])
+        fim = float(bloco["fim"])
+        if _tem_sobreposicao(inicio_cena, fim_cena, inicio, fim):
+            pontos.append(max(inicio_cena, inicio))
+            pontos.append(min(fim_cena, fim))
+
+    pontos = sorted({round(ponto, 3) for ponto in pontos if inicio_cena <= ponto <= fim_cena})
+    intervalos = []
+    for idx in range(len(pontos) - 1):
+        inicio = pontos[idx]
+        fim = pontos[idx + 1]
+        if fim - inicio < 0.05:
+            continue
+        tempo_meio = inicio + ((fim - inicio) / 2)
+        texto = _legenda_no_tempo(blocos_srt, tempo_meio)
+        intervalos.append({"inicio": inicio, "fim": fim, "texto": texto})
+
+    if not intervalos:
+        intervalos.append({"inicio": inicio_cena, "fim": fim_cena, "texto": ""})
+    return intervalos
+
+
+def _legenda_no_tempo(blocos_srt: list[dict], tempo: float) -> str:
+    for bloco in blocos_srt:
+        if float(bloco["inicio"]) <= tempo < float(bloco["fim"]):
+            return str(bloco["texto"])
+    return ""
+
+
+def _blocos_srt_edge_tts(pasta_projeto: Path) -> list[dict]:
+    fonte = pasta_projeto / "legendas" / "fonte_legenda.txt"
+    legenda = pasta_projeto / "legendas" / "legenda.srt"
+    if not fonte.exists() or "edge-tts" not in fonte.read_text(encoding="utf-8", errors="replace"):
+        return []
+    return ler_srt(legenda)
+
+
+def _audio_narracao(pasta_projeto: Path) -> Path | None:
+    for nome in ["narracao.mp3", "narracao.wav"]:
+        path = pasta_projeto / "audio" / nome
+        if path.exists() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+def _modo_narrado(pasta_projeto: Path) -> bool:
+    return (pasta_projeto / "roteiro" / "roteiro_narrado.txt").exists() or _fonte_legenda_edge_tts(pasta_projeto)
+
+
+def _fonte_legenda_edge_tts(pasta_projeto: Path) -> bool:
+    fonte = pasta_projeto / "legendas" / "fonte_legenda.txt"
+    return fonte.exists() and "edge-tts" in fonte.read_text(encoding="utf-8", errors="replace")
+
+
+def _mensagem_audio_narrado_ausente(pasta_projeto: Path) -> str:
+    if _fonte_legenda_edge_tts(pasta_projeto):
+        return (
+            "ERRO: legenda sincronizada edge-tts existe, mas audio/narracao.mp3 nao foi encontrado. Rode:\n"
+            f"python main.py narracao --projeto {pasta_projeto.name}"
+        )
+    return (
+        "ERRO: projeto narrado sem audio/narracao.mp3 ou audio/narracao.wav. Rode:\n"
+        f"python main.py narracao --projeto {pasta_projeto.name}"
+    )
+
+
+def _sincronizar_cenas_com_audio(pasta_projeto: Path, cenas: list[dict], duracao_audio: float) -> list[dict]:
+    duracoes = _distribuir_duracao_ponderada(duracao_audio, cenas)
+    inicio = 0.0
+    for cena, duracao in zip(cenas, duracoes):
+        cena["inicio_estimado"] = round(inicio, 3)
+        cena["duracao"] = round(duracao, 3)
+        cena["duracao_ajustada_por_audio"] = True
+        inicio += duracao
+    salvar_json(pasta_projeto / "cenas.json", cenas)
+    print(f"Duracao da narracao detectada: {duracao_audio:.1f} segundos")
+    print("Duracao das cenas ajustada ao audio")
+    return cenas
+
+
+def _distribuir_duracao_ponderada(duracao_audio: float, cenas: list[dict]) -> list[float]:
+    pesos = [max(0.1, float(cena.get("duracao", 5))) for cena in cenas]
+    soma = sum(pesos) or len(cenas)
+    duracoes = [duracao_audio * peso / soma for peso in pesos]
+    diferenca = duracao_audio - sum(duracoes)
+    if duracoes:
+        duracoes[-1] += diferenca
+    return duracoes
+
+
+def _tem_sobreposicao(a_inicio: float, a_fim: float, b_inicio: float, b_fim: float) -> bool:
+    return max(a_inicio, b_inicio) < min(a_fim, b_fim)
+
+
+def _duracao_midia(path: Path | None) -> float | None:
+    if not path:
+        return None
+    resultado = _ffprobe_valor(
+        [
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    if not resultado:
+        return None
+    try:
+        return float(resultado)
+    except ValueError:
+        return None
+
+
+def _tem_stream(path: Path, tipo: str) -> bool:
+    resultado = _ffprobe_valor(
+        [
+            "-select_streams",
+            f"{tipo}:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    return resultado == ("video" if tipo == "v" else "audio")
+
+
+def _ffprobe_valor(args: list[str]) -> str | None:
+    cmd = ["ffprobe", "-v", "error", *args]
+    try:
+        resultado = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    if resultado.returncode != 0:
+        return None
+    return resultado.stdout.strip()
+
+
 def criar_imagem_cena(
     cena: dict,
     caminho_saida: Path,
@@ -216,23 +447,27 @@ def criar_imagem_cena(
         imagem = _criar_gradiente_escuro()
 
     draw = ImageDraw.Draw(imagem)
-    fonte_topo = _carregar_fonte(38)
-    fonte_principal = _carregar_fonte(78)
-    fonte_legenda = _carregar_fonte(42)
-    fonte_pequena = _carregar_fonte(30)
-
-    titulo = _encurtar(tema, 44)
-    texto_principal = _encurtar(cena.get("texto_tela") or "Curiosidade", 58)
-    legenda = _encurtar(cena.get("narracao") or "", 120)
     cena_id = int(cena["id"])
+    titulo = _encurtar(tema, 48)
+    texto_principal = _texto_visual_cena(cena)
+    if "legenda_visual" in cena:
+        legenda = _encurtar(cena.get("legenda_visual") or "", 150)
+    else:
+        legenda = _encurtar(cena.get("legenda_curta") or cena.get("narracao") or "", 150)
 
-    _desenhar_topo(draw, titulo, fonte_topo, fonte_pequena, cena_id, total_cenas)
-    _desenhar_caixa_texto(draw, texto_principal, fonte_principal, centro_y=875, largura=880)
+    fonte_categoria = _carregar_fonte(30)
+    fonte_topo = _carregar_fonte(32)
+    fonte_principal = _fonte_para_linhas(texto_principal, largura=WIDTH - 160, max_linhas=2, tamanho_max=92, tamanho_min=72)
+    fonte_legenda = _fonte_para_linhas(legenda, largura=WIDTH - 180, max_linhas=3, tamanho_max=52, tamanho_min=42)
+    fonte_pequena = _carregar_fonte(28)
+
+    if not transparente:
+        _desenhar_textura_sutil(draw, cena_id)
+
+    _desenhar_topo(draw, titulo, fonte_categoria, fonte_topo, fonte_pequena, cena_id, total_cenas)
+    _desenhar_caixa_texto(draw, texto_principal, fonte_principal, centro_y=835, largura=WIDTH - 160)
     _desenhar_legenda(draw, legenda, fonte_legenda)
     _desenhar_progresso(draw, cena_id, total_cenas)
-
-    if not transparente and not background:
-        _desenhar_detalhes_visuais(draw, cena_id)
 
     imagem.save(caminho_saida)
     return caminho_saida
@@ -248,53 +483,86 @@ def gerar_imagem_texto(
     return criar_imagem_cena(cena, caminho_saida, texto, total_cenas=1)
 
 
-def _desenhar_topo(draw, titulo: str, fonte_titulo, fonte_numero, cena_id: int, total_cenas: int) -> None:
-    _desenhar_texto_com_sombra(draw, (80, 112), titulo.upper(), fonte_titulo, fill=(232, 238, 248))
+def _desenhar_topo(draw, titulo: str, fonte_categoria, fonte_titulo, fonte_numero, cena_id: int, total_cenas: int) -> None:
+    categoria = "CURIOSIDADE"
+    cat_bbox = _text_bbox(draw, categoria, fonte_categoria)
+    draw.rounded_rectangle((80, 84, 80 + (cat_bbox[2] - cat_bbox[0]) + 34, 134), radius=8, fill=(56, 189, 248, 44))
+    _desenhar_texto_com_sombra(draw, (97, 94), categoria, fonte_categoria, fill=(125, 211, 252), shadow_offset=2)
+    _desenhar_texto_com_sombra(draw, (80, 155), titulo.upper(), fonte_titulo, fill=(226, 232, 240), shadow_offset=2)
     numero = f"{cena_id:02}/{total_cenas:02}"
     bbox = _text_bbox(draw, numero, fonte_numero)
-    draw.rounded_rectangle((842, 90, 1000, 146), radius=22, fill=(255, 255, 255, 34))
-    _desenhar_texto_com_sombra(draw, (921 - (bbox[2] - bbox[0]) // 2, 103), numero, fonte_numero)
+    draw.rounded_rectangle((842, 90, 1000, 140), radius=8, fill=(15, 23, 42, 150), outline=(255, 255, 255, 32), width=1)
+    _desenhar_texto_com_sombra(draw, (921 - (bbox[2] - bbox[0]) // 2, 100), numero, fonte_numero, fill=(226, 232, 240), shadow_offset=2)
+
+
+def _texto_visual_cena(cena: dict) -> str:
+    texto = " ".join((cena.get("texto_tela") or "").split())
+    if not texto:
+        texto = "Curiosidade"
+    return _encurtar(texto, 46)
+
+
+def _fonte_para_linhas(texto: str, largura: int, max_linhas: int, tamanho_max: int, tamanho_min: int):
+    for tamanho in range(tamanho_max, tamanho_min - 1, -2):
+        fonte = _carregar_fonte(tamanho)
+        linhas = _quebrar_texto_limitado(texto, fonte, largura, max_linhas)
+        if len(linhas) <= max_linhas and all(_medir_texto(linha, fonte) <= largura for linha in linhas):
+            return fonte
+    return _carregar_fonte(tamanho_min)
 
 
 def _desenhar_caixa_texto(draw, texto: str, fonte, centro_y: int, largura: int) -> None:
-    linhas = quebrar_texto(texto, fonte, largura)
-    espacamento = 20
+    linhas = _quebrar_texto_limitado(texto, fonte, largura, max_linhas=2)
+    espacamento = 24
     altura_total = _altura_linhas(draw, linhas, fonte, espacamento)
     y = centro_y - altura_total // 2
-    caixa = (70, y - 58, WIDTH - 70, y + altura_total + 58)
-    draw.rounded_rectangle(caixa, radius=34, fill=(0, 0, 0, 112), outline=(255, 255, 255, 42), width=2)
+    caixa = (70, y - 62, WIDTH - 70, y + altura_total + 62)
+    draw.rounded_rectangle(caixa, radius=10, fill=(0, 0, 0, 118), outline=(255, 255, 255, 34), width=2)
+    draw.rectangle((90, caixa[1] + 18, 101, caixa[3] - 18), fill=(250, 204, 21, 210))
     for linha in linhas:
         bbox = _text_bbox(draw, linha, fonte)
         x = (WIDTH - (bbox[2] - bbox[0])) // 2
-        _desenhar_texto_com_sombra(draw, (x, y), linha, fonte, shadow_offset=4)
+        _desenhar_texto_com_sombra(draw, (x, y), linha, fonte, fill=(255, 255, 255), shadow_offset=5)
         y += (bbox[3] - bbox[1]) + espacamento
 
 
 def _desenhar_legenda(draw, texto: str, fonte) -> None:
-    linhas = quebrar_texto(texto, fonte, 880)[:3]
-    espacamento = 14
+    if not " ".join((texto or "").split()):
+        return
+    linhas = _quebrar_texto_limitado(texto, fonte, WIDTH - 180, max_linhas=2)
+    espacamento = 16
     altura_total = _altura_linhas(draw, linhas, fonte, espacamento)
-    y = 1370
-    draw.rounded_rectangle((70, y - 42, WIDTH - 70, y + altura_total + 42), radius=26, fill=(0, 0, 0, 145))
+    y = 1245
+    draw.rounded_rectangle((80, y - 46, WIDTH - 80, y + altura_total + 46), radius=10, fill=(0, 0, 0, 170), outline=(255, 255, 255, 28), width=1)
     for linha in linhas:
         bbox = _text_bbox(draw, linha, fonte)
         x = (WIDTH - (bbox[2] - bbox[0])) // 2
-        _desenhar_texto_com_sombra(draw, (x, y), linha, fonte, fill=(245, 247, 250), shadow_offset=3)
+        _desenhar_texto_com_sombra(draw, (x, y), linha, fonte, fill=(241, 245, 249), shadow_offset=3)
         y += (bbox[3] - bbox[1]) + espacamento
 
 
 def _desenhar_progresso(draw, cena_id: int, total_cenas: int) -> None:
-    x1, y1, x2, y2 = 90, 1778, 990, 1794
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=8, fill=(255, 255, 255, 42))
+    x1, y1, x2, y2 = 80, 1814, 1000, 1824
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=5, fill=(255, 255, 255, 38))
     largura = int((x2 - x1) * cena_id / max(total_cenas, 1))
-    draw.rounded_rectangle((x1, y1, x1 + largura, y2), radius=8, fill=(56, 189, 248, 220))
+    draw.rounded_rectangle((x1, y1, x1 + largura, y2), radius=5, fill=(250, 204, 21, 230))
+
+
+def _desenhar_textura_sutil(draw, cena_id: int) -> None:
+    for y in (318, 1110, 1660):
+        offset = (cena_id * 19 + y) % 120
+        draw.line((120 + offset, y, 960 - offset // 2, y), fill=(255, 255, 255, 10), width=1)
+    for i in range(7):
+        x = 105 + ((i * 97 + cena_id * 31) % 850)
+        y = 300 + ((i * 173 + cena_id * 43) % 1260)
+        draw.rectangle((x, y, x + 3, y + 3), fill=(255, 255, 255, 14))
+    _desenhar_detalhes_visuais(draw, cena_id)
 
 
 def _desenhar_detalhes_visuais(draw, cena_id: int) -> None:
-    cor = (56, 189, 248, 70) if cena_id % 2 else (148, 163, 184, 64)
-    draw.ellipse((-180, 1180, 360, 1720), fill=cor)
-    draw.ellipse((760, 230, 1190, 660), fill=(255, 255, 255, 24))
-    draw.line((100, 320, 980, 320), fill=(255, 255, 255, 38), width=3)
+    draw.ellipse((72, 1510, 128, 1566), fill=(56, 189, 248, 36))
+    draw.ellipse((930, 345, 982, 397), fill=(250, 204, 21, 28))
+    draw.line((80, 234, 1000, 234), fill=(255, 255, 255, 32), width=2)
 
 
 def desenhar_texto_com_sombra(draw, pos: tuple[int, int], texto: str, fonte) -> None:
@@ -336,6 +604,19 @@ def quebrar_texto(texto: str, fonte, largura_maxima: int) -> list[str]:
     if linha_atual:
         linhas.append(linha_atual)
     return linhas[:5]
+
+
+def _quebrar_texto_limitado(texto: str, fonte, largura_maxima: int, max_linhas: int) -> list[str]:
+    linhas = quebrar_texto(texto, fonte, largura_maxima)
+    if len(linhas) <= max_linhas:
+        return linhas
+
+    linhas_limitadas = linhas[:max_linhas]
+    ultima = linhas_limitadas[-1]
+    while ultima and _medir_texto(ultima + "...", fonte) > largura_maxima:
+        ultima = ultima.rsplit(" ", 1)[0] if " " in ultima else ultima[:-1]
+    linhas_limitadas[-1] = (ultima.rstrip() + "...") if ultima else "..."
+    return linhas_limitadas
 
 
 def _preparar_background_imagem(path: Path):
@@ -412,6 +693,109 @@ def _executar_cena(cmd: list[str], pasta_projeto: Path, cena_id: int) -> None:
         etapa="renderizar_cena",
         cena_id=cena_id,
     )
+
+
+def _gerar_video_final_com_audio(pasta_projeto: Path, video_sem_audio: Path, saida: Path, exigir_audio: bool = False) -> None:
+    audio = _audio_narracao(pasta_projeto)
+    if not audio:
+        if exigir_audio:
+            raise RuntimeError(_mensagem_audio_narrado_ausente(pasta_projeto))
+        saida.write_bytes(video_sem_audio.read_bytes())
+        _validar_video_gerado(saida)
+        return
+
+    print("Adicionando áudio...")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_sem_audio),
+        "-i",
+        str(audio),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(saida),
+    ]
+    try:
+        executar(
+            cmd,
+            pasta_projeto / "logs" / "ffmpeg_audio_erro.log",
+            etapa="adicionar_audio",
+            timeout=120,
+        )
+    except RuntimeError:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_sem_audio),
+            "-i",
+            str(audio),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(saida),
+        ]
+        executar(
+            cmd,
+            pasta_projeto / "logs" / "ffmpeg_audio_erro.log",
+            etapa="adicionar_audio",
+            timeout=120,
+        )
+    _validar_video_gerado(saida, cmd=cmd)
+
+
+def _validar_video_final(saida: Path, audio_referencia: Path | None, exigir_audio: bool = False) -> None:
+    if not ffprobe_disponivel():
+        if exigir_audio:
+            raise RuntimeError("ERRO: ffprobe nao encontrado; nao foi possivel validar a faixa de audio.")
+        print("AVISO: ffprobe nao encontrado; validacao de streams pulada.")
+        return
+    if not _tem_stream(saida, "v"):
+        raise RuntimeError("ERRO: video final gerado sem faixa de video.")
+    if not _tem_stream(saida, "a"):
+        mensagem = "ERRO: vídeo final gerado sem faixa de áudio."
+        if exigir_audio:
+            raise RuntimeError(mensagem)
+        print(mensagem)
+        return
+
+    duracao_video = _duracao_midia(saida)
+    duracao_audio = _duracao_midia(audio_referencia) if audio_referencia else None
+    if duracao_video:
+        print(f"Duração do vídeo final: {duracao_video:.1f} segundos")
+    if duracao_audio:
+        print(f"Duração do áudio: {duracao_audio:.1f} segundos")
+    if duracao_video and duracao_audio:
+        diferenca = abs(duracao_video - duracao_audio)
+        print(f"Diferença vídeo/áudio: {diferenca:.2f} segundos")
+        if diferenca > 1:
+            print("AVISO: duração do vídeo e do áudio estão diferentes.")
 
 
 def _validar_video_gerado(path: Path, cmd: list[str] | None = None) -> None:

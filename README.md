@@ -113,10 +113,31 @@ pacote_postagem/hashtags.txt
 pacote_postagem/checklist_publicacao.txt
 ```
 
-## Rodar tudo
+## Fluxo narrado
 
 ```powershell
-python main.py tudo --nicho curiosidade --tema "O poder real da .44 Magnum"
+python main.py narrado --nicho curiosidade --tema "O poder real da .44 Magnum"
+```
+
+O fluxo narrado gera pesquisa local, roteiro, cenas, narracao com `edge-tts`,
+legenda sincronizada `.srt`, montagem vertical e pacote de postagem.
+
+Quando `edge-tts` funciona, ele gera ao mesmo tempo:
+
+```text
+audio/narracao.mp3
+legendas/legenda.srt
+pacote_postagem/legenda.srt
+```
+
+O montador usa a duracao real da narracao para ajustar a duracao das cenas.
+Se o `edge-tts` falhar, o sistema tenta `pyttsx3` como fallback e gera legenda
+estimada apenas quando nao existir legenda sincronizada.
+
+Para diagnosticar sincronizacao:
+
+```powershell
+python main.py diagnostico --projeto o_poder_real_da_44_magnum
 ```
 
 ## O que ainda e manual

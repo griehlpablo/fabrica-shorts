@@ -15,6 +15,8 @@ class carregar_json:
 
 
 PROJECT_SUBDIRS = [
+    "pesquisa",
+    "roteiro",
     "midias/aprovadas",
     "midias/revisar",
     "midias/precisa_autorizacao",
@@ -26,6 +28,17 @@ PROJECT_SUBDIRS = [
     "render",
     "pacote_postagem",
     "logs",
+]
+
+PROJECT_STEPS = [
+    "pesquisa",
+    "roteiro",
+    "cenas",
+    "midias",
+    "narracao",
+    "legendas",
+    "montagem",
+    "pacote",
 ]
 
 
@@ -53,6 +66,9 @@ def criar_estrutura_projeto(base_dir: Path, nome: str, nicho: str, tema: str) ->
     escrever_se_nao_existir(pasta / "midias" / "imagens.txt", "")
     escrever_se_nao_existir(pasta / "midias" / "videos.txt", "")
     escrever_se_nao_existir(pasta / "midias" / "referencias.txt", "")
+    escrever_se_nao_existir(pasta / "links_sugeridos" / "imagens.txt", "")
+    escrever_se_nao_existir(pasta / "links_sugeridos" / "videos.txt", "")
+    escrever_se_nao_existir(pasta / "links_sugeridos" / "referencias.txt", "")
 
     status_path = pasta / "status.json"
     if not status_path.exists():
@@ -62,15 +78,19 @@ def criar_estrutura_projeto(base_dir: Path, nome: str, nicho: str, tema: str) ->
                 "projeto": nome,
                 "nicho": nicho,
                 "status": "criado",
-                "etapas": {
-                    "roteiro": "pendente",
-                    "cenas": "pendente",
-                    "midias": "pendente",
-                    "montagem": "pendente",
-                    "pacote": "pendente",
-                },
+                "etapas": {etapa: "pendente" for etapa in PROJECT_STEPS},
             },
         )
+    else:
+        dados = carregar_json_arquivo(status_path)
+        etapas = dados.setdefault("etapas", {})
+        alterado = False
+        for etapa in PROJECT_STEPS:
+            if etapa not in etapas:
+                etapas[etapa] = "pendente"
+                alterado = True
+        if alterado:
+            salvar_json(status_path, dados)
     return pasta
 
 
@@ -98,9 +118,9 @@ def atualizar_status(pasta_projeto: Path, status: str | None = None, **etapas: s
     dados = carregar_json_arquivo(status_path)
     if status:
         dados["status"] = status
+    dados.setdefault("etapas", {})
     for etapa, valor in etapas.items():
-        if etapa in dados.get("etapas", {}):
-            dados["etapas"][etapa] = valor
+        dados["etapas"][etapa] = valor
     salvar_json(status_path, dados)
 
 
@@ -121,6 +141,39 @@ def ffmpeg_disponivel() -> bool:
 
 def ffprobe_disponivel() -> bool:
     return shutil.which("ffprobe") is not None
+
+
+def obter_duracao_midia(caminho: Path) -> float | None:
+    if not ffprobe_disponivel() or not caminho.exists():
+        return None
+    resultado = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(caminho),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        timeout=30,
+    )
+    if resultado.returncode != 0:
+        return None
+    try:
+        return float(resultado.stdout.strip())
+    except ValueError:
+        return None
+
+
+def obter_duracao_midias(caminho: Path) -> float | None:
+    return obter_duracao_midia(caminho)
 
 
 def executar(

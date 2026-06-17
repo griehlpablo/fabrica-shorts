@@ -1,0 +1,11 @@
+{
+  "engine": "edge-tts",
+  "fallback_engine": "pyttsx3",
+  "voice": "pt-BR-AntonioNeural",
+  "rate": "+0%",
+  "volume": "+0%",
+  "output_format": "mp3",
+  "pyttsx3_rate": 180,
+  "pyttsx3_volume": 1.0,
+  "voice_hint": "portuguese"
+}
