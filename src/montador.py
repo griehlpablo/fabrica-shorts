@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 from src.utils import atualizar_status, carregar_json_arquivo, executar, ffmpeg_disponivel, salvar_json
@@ -26,8 +27,10 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
     stats = {"cenas": len(cenas), "midias": 0, "fallback": 0}
     print(f"Montagem: {stats['cenas']} cenas detectadas.")
 
-    for cena in cenas:
+    for indice, cena in enumerate(cenas, start=1):
+        print(f"Renderizando cena {indice}/{len(cenas)}...")
         segmento = render_dir / f"cena_{int(cena['id']):03}.mp4"
+        _apagar_mp4_vazio(segmento)
         item = plano_por_cena.get(cena["id"], {})
         arquivo_rel = item.get("arquivo_copiado")
         arquivo = pasta_projeto / arquivo_rel if arquivo_rel else None
@@ -42,16 +45,19 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
                 total_cenas=len(cenas),
             )
         except RuntimeError as exc:
+            _apagar_mp4_vazio(segmento)
             _registrar_erro_montagem(
                 pasta_projeto,
                 etapa="renderizar_cena",
                 cena_id=cena.get("id"),
                 erro=str(exc),
+                traceback_text=traceback.format_exc(),
             )
             raise RuntimeError(
                 f"Falha ao renderizar a cena {cena.get('id')}. "
                 f"Erro completo salvo em: {pasta_projeto / 'logs' / 'montagem_erro.txt'}"
             ) from exc
+        print(f"Cena {indice} concluída: {segmento}")
         stats["midias" if usou_midia else "fallback"] += 1
         segmentos.append(segmento)
 
@@ -63,30 +69,41 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
 
     saida = pasta_projeto / "pacote_postagem" / "video_final.mp4"
     saida.parent.mkdir(parents=True, exist_ok=True)
+    cmd_concat = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(lista),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(saida),
+    ]
     try:
         executar(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(lista),
-                "-c",
-                "copy",
-                str(saida),
-            ],
+            cmd_concat,
             pasta_projeto / "logs" / "ffmpeg_concat_erro.log",
             etapa="concatenar_cenas",
         )
+        _validar_video_gerado(saida, cmd=cmd_concat)
     except RuntimeError as exc:
         _registrar_erro_montagem(
             pasta_projeto,
             etapa="concatenar_cenas",
             cena_id=None,
             erro=str(exc),
+            traceback_text=traceback.format_exc(),
         )
         raise RuntimeError(
             f"Falha ao juntar as cenas. Erro completo salvo em: {pasta_projeto / 'logs' / 'montagem_erro.txt'}"
@@ -108,7 +125,8 @@ def _renderizar_cena(
     tema: str,
     total_cenas: int,
 ) -> bool:
-    duracao = str(int(cena.get("duracao", 5)))
+    duracao_int = int(cena.get("duracao", 5))
+    duracao = str(duracao_int)
     cena_id = int(cena["id"])
 
     if arquivo and arquivo.suffix.lower() in VIDEO_EXTS:
@@ -136,40 +154,45 @@ def _renderizar_cena(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "ultrafast",
             "-crf",
-            "23",
+            "28",
             str(saida),
         ]
         _executar_cena(cmd, pasta_projeto, cena_id)
+        _validar_video_gerado(saida, cmd=cmd)
         return True
 
     imagem_cena = pasta_projeto / "render" / f"cena_{cena_id:03}.png"
     background = arquivo if arquivo and arquivo.suffix.lower() in IMAGE_EXTS else None
     criar_imagem_cena(cena, imagem_cena, tema, total_cenas, background=background)
+    frames = duracao_int * 30
     cmd = [
         "ffmpeg",
         "-y",
         "-loop",
         "1",
-        "-t",
-        duracao,
         "-i",
         str(imagem_cena),
         "-vf",
-        f"scale=1080:1920,zoompan=z='min(zoom+0.001,1.08)':d={int(duracao) * 30}:s=1080x1920,format=yuv420p",
+        "scale=1080:1920,format=yuv420p",
         "-an",
-        "-r",
-        "30",
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "ultrafast",
         "-crf",
-        "23",
+        "28",
+        "-r",
+        "30",
+        "-frames:v",
+        str(frames),
+        "-movflags",
+        "+faststart",
         str(saida),
     ]
     _executar_cena(cmd, pasta_projeto, cena_id)
+    _validar_video_gerado(saida, cmd=cmd)
     return background is not None
 
 
@@ -391,6 +414,25 @@ def _executar_cena(cmd: list[str], pasta_projeto: Path, cena_id: int) -> None:
     )
 
 
+def _validar_video_gerado(path: Path, cmd: list[str] | None = None) -> None:
+    if not path.exists():
+        mensagem = f"Arquivo de video nao foi criado: {path}"
+        if cmd:
+            mensagem += "\n\nComando executado:\n" + " ".join(cmd)
+        raise RuntimeError(mensagem)
+    if path.stat().st_size <= 0:
+        _apagar_mp4_vazio(path)
+        mensagem = f"Arquivo de video ficou com 0 bytes: {path}"
+        if cmd:
+            mensagem += "\n\nComando executado:\n" + " ".join(cmd)
+        raise RuntimeError(mensagem)
+
+
+def _apagar_mp4_vazio(path: Path) -> None:
+    if path.suffix.lower() == ".mp4" and path.exists() and path.stat().st_size == 0:
+        path.unlink()
+
+
 def _ffmpeg_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
 
@@ -400,24 +442,23 @@ def _registrar_erro_montagem(
     etapa: str,
     cena_id: int | str | None,
     erro: str,
+    traceback_text: str | None = None,
 ) -> None:
     log_path = pasta_projeto / "logs" / "montagem_erro.txt"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        "\n".join(
-            [
-                "Etapa:",
-                etapa,
-                "",
-                "Cena:",
-                str(cena_id) if cena_id is not None else "nao informada",
-                "",
-                "Erro:",
-                erro,
-            ]
-        ),
-        encoding="utf-8",
-    )
+    partes = [
+        "Etapa:",
+        etapa,
+        "",
+        "Cena:",
+        str(cena_id) if cena_id is not None else "nao informada",
+        "",
+        "Erro:",
+        erro,
+    ]
+    if traceback_text:
+        partes.extend(["", "Traceback:", traceback_text])
+    log_path.write_text("\n".join(partes), encoding="utf-8")
 
 
 def _pillow():

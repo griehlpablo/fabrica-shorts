@@ -128,8 +128,42 @@ def executar(
     log_path: Path | None = None,
     etapa: str | None = None,
     cena_id: int | str | None = None,
+    timeout: int = 120,
 ) -> None:
-    resultado = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", shell=False)
+    try:
+        resultado = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partes = [
+            "Etapa:",
+            etapa or "nao informada",
+            "",
+            "Cena:",
+            str(cena_id) if cena_id is not None else "nao informada",
+            "",
+            "Timeout:",
+            f"Comando excedeu {timeout} segundos e foi interrompido.",
+            "",
+            "Comando executado:",
+            " ".join(cmd),
+            "",
+            "STDOUT parcial:",
+            _normalizar_saida_subprocess(exc.stdout),
+            "",
+            "STDERR parcial:",
+            _normalizar_saida_subprocess(exc.stderr),
+        ]
+        mensagem = "\n".join(partes).strip()
+        _salvar_log_execucao(log_path, mensagem)
+        raise RuntimeError(f"Timeout ao executar FFmpeg apos {timeout} segundos. Veja logs/montagem_erro.txt.") from exc
+
     if resultado.returncode != 0:
         partes = [
             "Etapa:",
@@ -148,7 +182,22 @@ def executar(
             resultado.stderr.strip(),
         ]
         mensagem = "\n".join(partes).strip()
-        if log_path:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(mensagem, encoding="utf-8")
+        _salvar_log_execucao(log_path, mensagem)
         raise RuntimeError(mensagem)
+
+
+def _normalizar_saida_subprocess(saida: str | bytes | None) -> str:
+    if saida is None:
+        return ""
+    if isinstance(saida, bytes):
+        return saida.decode("utf-8", errors="replace").strip()
+    return saida.strip()
+
+
+def _salvar_log_execucao(log_path: Path | None, mensagem: str) -> None:
+    if not log_path:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(mensagem, encoding="utf-8")
+    if log_path.parent.name == "logs":
+        (log_path.parent / "montagem_erro.txt").write_text(mensagem, encoding="utf-8")
