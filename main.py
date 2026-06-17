@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 from src.alinhamento import alinhar_legenda
 from src.cenas import gerar_cenas, gerar_cenas_projeto
 from src.curador_midia import verificar_midias
+from src.fontes_midia import apis_configuradas
+from src.intencao_visual import gerar_plano_visual
 from src.legendas import duracao_srt, fonte_legenda, gerar_legendas, ler_srt
 from src.montador import montar_video
 from src.narracao import gerar_narracao, gerar_teste_voz, listar_vozes
@@ -17,6 +20,7 @@ from src.pesquisa import gerar_pesquisa
 from src.roteiro import gerar_roteiro, gerar_roteiro_projeto
 from src.utils import (
     carregar_json,
+    carregar_json_arquivo,
     criar_estrutura_projeto,
     ambiente_utf8,
     ffprobe_disponivel,
@@ -156,6 +160,7 @@ def cmd_diagnostico(args: argparse.Namespace) -> None:
         print("AVISO: legenda contem reticencias. Verifique se sao do roteiro original ou truncamento indevido.")
     print(f"Legenda renderizada por ASS/libass: {_sim_nao(_montagem_flag(montagem, 'legenda_ass_aplicada'))}")
     print(f"Fallback Pillow usado: {_sim_nao(_montagem_flag(montagem, 'fallback_pillow_legenda'))}")
+    _diagnostico_visual_direitos(pasta)
     if video.exists() and ffprobe_disponivel():
         resolucao = _resolucao_video(video)
         print(f"Resolucao do video: {resolucao or 'indisponivel'}")
@@ -163,14 +168,26 @@ def cmd_diagnostico(args: argparse.Namespace) -> None:
     if fonte_texto not in {"stable-ts", "edge-tts"}:
         print("AVISO: usando legenda estimada, nao sincronizada pelo edge-tts.")
         print("AVISO: legenda visual sera renderizada por cena ou fallback, nao por bloco SRT.")
+    elif _montagem_flag(montagem, "legenda_ass_aplicada"):
+        print(f"Legenda visual: renderizada por ASS/libass ({fonte_texto}).")
     else:
-        print("Legenda visual: renderizada por bloco SRT.")
+        print(f"Legenda visual: renderizada por fonte sincronizada ({fonte_texto}).")
 
 
 def cmd_midias(args: argparse.Namespace) -> None:
     pasta = projeto_path(BASE_DIR, args.projeto)
-    verificar_midias(BASE_DIR, pasta)
+    verificar_midias(BASE_DIR, pasta, fonte=getattr(args, "fonte", "local"))
     print(f"Plano de midias atualizado em: {pasta / 'plano_midias.json'}")
+
+
+def cmd_plano_visual(args: argparse.Namespace) -> None:
+    pasta = projeto_path(BASE_DIR, args.projeto)
+    gerar_plano_visual(pasta)
+
+
+def cmd_buscar_midias(args: argparse.Namespace) -> None:
+    pasta = projeto_path(BASE_DIR, args.projeto)
+    verificar_midias(BASE_DIR, pasta, fonte=args.fonte)
 
 
 def cmd_montar(args: argparse.Namespace) -> None:
@@ -207,7 +224,8 @@ def cmd_narrado(args: argparse.Namespace) -> None:
     gerar_pesquisa(pasta)
     gerar_roteiro_projeto(pasta)
     gerar_cenas_projeto(pasta, args.tema)
-    verificar_midias(BASE_DIR, pasta)
+    gerar_plano_visual(pasta)
+    verificar_midias(BASE_DIR, pasta, fonte="todas")
     print("Midias locais verificadas")
     gerar_narracao(BASE_DIR, pasta)
     if _projeto_narrado(pasta) and not _audio_oficial(pasta):
@@ -232,7 +250,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     midias = sub.add_parser("midias", help="Reverifica midias locais para um projeto.")
     midias.add_argument("--projeto", required=True)
+    midias.add_argument("--fonte", choices=["local", "externas", "todas"], default="local")
     midias.set_defaults(func=cmd_midias)
+
+    plano_visual = sub.add_parser("plano-visual", help="Gera plano visual e shotlist por cena.")
+    plano_visual.add_argument("--projeto", required=True)
+    plano_visual.set_defaults(func=cmd_plano_visual)
+
+    buscar_midias = sub.add_parser("buscar-midias", help="Busca e pontua midias locais/externas.")
+    buscar_midias.add_argument("--projeto", required=True)
+    buscar_midias.add_argument("--fonte", choices=["local", "externas", "todas"], default="todas")
+    buscar_midias.set_defaults(func=cmd_buscar_midias)
 
     pesquisar = sub.add_parser("pesquisar", help="Gera briefing e pendencias factuais locais.")
     pesquisar.add_argument("--projeto", required=True)
@@ -341,6 +369,56 @@ def _texto_contem_reticencias(path: Path) -> bool:
     if not path.exists():
         return False
     return "..." in path.read_text(encoding="utf-8", errors="replace")
+
+
+def _diagnostico_visual_direitos(pasta: Path) -> None:
+    plano_visual = pasta / "plano_visual.json"
+    shotlist = pasta / "shotlist.md"
+    fontes = pasta / "fontes_midias.json"
+    plano_midias = pasta / "plano_midias.json"
+    print(f"plano_visual.json existe: {_sim_nao(plano_visual.exists())}")
+    print(f"shotlist.md existe: {_sim_nao(shotlist.exists())}")
+    print(f"fontes_midias.json existe: {_sim_nao(fontes.exists())}")
+    plano = carregar_json_arquivo(plano_midias, default=[])
+    registros = carregar_json_arquivo(fontes, default=[])
+    usadas = [item.get("midia_selecionada") for item in plano if item.get("midia_selecionada")]
+    unicas = set(usadas)
+    repeticao_consecutiva = any(usadas[i] == usadas[i - 1] for i in range(1, len(usadas)))
+    print(f"Midias usadas: {len(usadas)}")
+    print(f"Midias unicas: {len(unicas)}")
+    print(f"Houve repeticao: {_sim_nao(len(usadas) != len(unicas))}")
+    print(f"Houve repeticao consecutiva: {_sim_nao(repeticao_consecutiva)}")
+    print(f"Cenas com fallback: {sum(1 for item in plano if item.get('fallback_usado'))}")
+    print(f"Cenas com video: {sum(1 for item in plano if _tipo_midia_plano(item) == 'video')}")
+    print(f"Cenas com imagem: {sum(1 for item in plano if _tipo_midia_plano(item) == 'imagem')}")
+    print(f"Midias de biblioteca/local: {sum(1 for item in plano if item.get('provedor') in {'Local', None})}")
+    print(f"Midias de API externa: {sum(1 for item in plano if item.get('provedor') not in {'Local', 'fallback', None})}")
+    print(f"Midias com licenca registrada: {sum(1 for item in registros if item.get('licenca'))}")
+    sem_licenca = sum(1 for item in registros if item.get("status") == "local_sem_licenca")
+    sem_licenca = max(sem_licenca, sum(1 for item in plano if item.get("provedor") == "Local" and not item.get("licenca")))
+    print(f"Midias sem licenca: {sem_licenca}")
+    print(f"Midias para revisar: {sum(1 for item in registros if item.get('status') == 'revisar')}")
+    scores = [float(item.get("score", 0)) for item in plano]
+    media_score = sum(scores) / len(scores) if scores else 0
+    print(f"Score medio das midias: {media_score:.1f}")
+    baixos = [str(item.get("cena_id")) for item in plano if float(item.get("score", 0)) < 15]
+    print(f"Cenas com score baixo: {', '.join(baixos) if baixos else 'nenhuma'}")
+    print(f"APIs configuradas: Pexels {_sim_nao(bool(os.environ.get('PEXELS_API_KEY')))}, Pixabay {_sim_nao(bool(os.environ.get('PIXABAY_API_KEY')))}, Wikimedia sim")
+    print(f"Midia externa baixada: {_sim_nao(any(item.get('provedor') not in {'Local', 'fallback', None} for item in registros))}")
+    erros_api = pasta / "logs" / "apis_midia_erro.json"
+    print(f"Erros de API: {_status_arquivo(erros_api)}")
+    if sem_licenca:
+        print("AVISO: midia local sem licenca registrada.")
+    if any(item.get("fallback_usado") for item in plano):
+        print("AVISO: fallback visual usado em uma ou mais cenas.")
+
+
+def _tipo_midia_plano(item: dict) -> str:
+    for grupo in ["candidatos_local", "candidatos_externos"]:
+        for candidato in item.get(grupo, []):
+            if candidato.get("arquivo") == item.get("midia_selecionada"):
+                return candidato.get("tipo", "")
+    return ""
 
 
 def _montagem_flag(path: Path, chave: str) -> bool:

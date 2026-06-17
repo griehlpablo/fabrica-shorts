@@ -21,6 +21,9 @@ def gerar_pacote(pasta_projeto: Path) -> None:
             [
                 "[ ] Revisar fatos.",
                 "[ ] Revisar direitos das midias.",
+                "[ ] Conferir fontes_midias.json.",
+                "[ ] Confirmar se midias locais sao proprias, autorizadas ou licenciadas.",
+                "[ ] Conferir se midias externas tem URL, licenca e autor.",
                 "[ ] Conferir se o video tem audio.",
                 "[ ] Conferir legenda.",
                 "[ ] Conferir acentos.",
@@ -40,6 +43,10 @@ def gerar_pacote(pasta_projeto: Path) -> None:
     legenda_ass = pasta_projeto / "legendas" / "legenda.ass"
     if legenda_ass.exists():
         (pacote / "legenda.ass").write_text(legenda_ass.read_text(encoding="utf-8"), encoding="utf-8")
+    for nome in ["fontes_midias.json", "plano_visual.json", "shotlist.md", "plano_midias.json"]:
+        origem = pasta_projeto / nome
+        if origem.exists():
+            (pacote / nome).write_text(origem.read_text(encoding="utf-8"), encoding="utf-8")
 
     atualizar_status(pasta_projeto, status="pacote_pronto", pacote="concluido")
     print("Pacote de postagem gerado")

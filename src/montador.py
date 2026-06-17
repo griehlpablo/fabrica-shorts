@@ -45,9 +45,17 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
     for indice, cena in enumerate(cenas, start=1):
         print(f"Renderizando cena {indice}/{len(cenas)}...")
         item = plano_por_cena.get(cena["id"], {})
-        arquivo_rel = item.get("arquivo_copiado")
-        arquivo = pasta_projeto / arquivo_rel if arquivo_rel else None
+        arquivo_rel = item.get("arquivo_copiado") or item.get("midia_selecionada")
+        arquivo = _resolver_arquivo_midia(base_dir, pasta_projeto, arquivo_rel)
         arquivo_valido = arquivo if arquivo and arquivo.exists() else None
+        if item:
+            cena.update(
+                {
+                    "funcao_narrativa": item.get("funcao_narrativa") or item.get("intencao_visual"),
+                    "prioridade_visual": item.get("prioridade_visual", 5),
+                    "fallback_variante": item.get("cena_id", cena.get("id")),
+                }
+            )
         try:
             if blocos_srt:
                 segmentos_cena, usou_midia = _renderizar_cena_por_blocos_srt(
@@ -218,9 +226,14 @@ def _renderizar_cena(
 
     imagem_cena = pasta_projeto / "render" / f"cena_{cena_id:03}.png"
     background = arquivo if arquivo and arquivo.suffix.lower() in IMAGE_EXTS else None
-    criar_imagem_cena(cena, imagem_cena, tema, total_cenas, background=background)
+    criar_imagem_cena(cena, imagem_cena, tema, total_cenas, transparente=background is not None)
     duracao = _duracao_cena(cena, tem_background=background is not None)
     frames = max(1, round(duracao * 30))
+    if background:
+        cmd = _cmd_imagem_ken_burns(background, imagem_cena, saida, frames, cena_id)
+        _executar_cena(cmd, pasta_projeto, cena_id)
+        _validar_video_gerado(saida, cmd=cmd)
+        return True
     cmd = [
         "ffmpeg",
         "-y",
@@ -248,6 +261,44 @@ def _renderizar_cena(
     _executar_cena(cmd, pasta_projeto, cena_id)
     _validar_video_gerado(saida, cmd=cmd)
     return background is not None
+
+
+def _cmd_imagem_ken_burns(background: Path, overlay: Path, saida: Path, frames: int, cena_id: int) -> list[str]:
+    zoom = "min(zoom+0.0012,1.12)" if cena_id % 2 else "min(zoom+0.0010,1.10)"
+    x_expr = "iw/2-(iw/zoom/2)"
+    y_expr = "ih/2-(ih/zoom/2)"
+    filtro = (
+        "[0:v]scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840,"
+        f"zoompan=z='{zoom}':x='{x_expr}':y='{y_expr}':d={frames}:s=1080x1920:fps=30,"
+        "eq=brightness=-0.12[bg];"
+        "[bg][1:v]overlay=0:0,format=yuv420p[v]"
+    )
+    return [
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(background),
+        "-i",
+        str(overlay),
+        "-filter_complex",
+        filtro,
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-frames:v",
+        str(frames),
+        "-movflags",
+        "+faststart",
+        str(saida),
+    ]
 
 
 def _duracao_cena(cena: dict, tem_background: bool) -> float:
@@ -516,7 +567,7 @@ def criar_imagem_cena(
         escurecer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 92))
         imagem = Image.alpha_composite(imagem, escurecer)
     else:
-        imagem = _criar_gradiente_escuro()
+        imagem = _criar_gradiente_escuro(cena)
 
     draw = ImageDraw.Draw(imagem)
     cena_id = int(cena["id"])
@@ -703,15 +754,24 @@ def _preparar_background_imagem(path: Path):
     return imagem.resize((WIDTH, HEIGHT)).filter(ImageFilter.GaussianBlur(radius=1.2))
 
 
-def _criar_gradiente_escuro():
+def _criar_gradiente_escuro(cena: dict | None = None):
     Image, ImageDraw, _, _ = _pillow()
     imagem = Image.new("RGBA", (WIDTH, HEIGHT))
     draw = ImageDraw.Draw(imagem)
+    cena_id = int((cena or {}).get("id", 1))
+    paletas = [
+        ((8, 14, 28), (20, 36, 80)),
+        ((12, 12, 18), (44, 28, 54)),
+        ((10, 18, 18), (18, 58, 52)),
+        ((16, 14, 10), (58, 44, 22)),
+        ((9, 12, 20), (42, 48, 62)),
+    ]
+    topo, base = paletas[cena_id % len(paletas)]
     for y in range(HEIGHT):
         t = y / max(HEIGHT - 1, 1)
-        r = int(8 + 12 * (1 - t))
-        g = int(14 + 22 * (1 - t))
-        b = int(28 + 52 * (1 - t))
+        r = int(topo[0] * (1 - t) + base[0] * t)
+        g = int(topo[1] * (1 - t) + base[1] * t)
+        b = int(topo[2] * (1 - t) + base[2] * t)
         draw.line((0, y, WIDTH, y), fill=(r, g, b, 255))
     return imagem
 
@@ -885,6 +945,21 @@ def _apagar_mp4_vazio(path: Path) -> None:
 
 def _ffmpeg_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+
+
+def _resolver_arquivo_midia(base_dir: Path, pasta_projeto: Path, arquivo_rel: str | None) -> Path | None:
+    if not arquivo_rel:
+        return None
+    path = Path(arquivo_rel)
+    if path.is_absolute():
+        return path
+    candidato_projeto = pasta_projeto / path
+    if candidato_projeto.exists():
+        return candidato_projeto
+    candidato_base = base_dir / path
+    if candidato_base.exists():
+        return candidato_base
+    return candidato_projeto
 
 
 def _registrar_erro_montagem(

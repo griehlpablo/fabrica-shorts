@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .env
+config/secrets.json
+config/api_keys.json
 
 projetos/*
 !projetos/.gitkeep
