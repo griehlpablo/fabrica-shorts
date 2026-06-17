@@ -39,6 +39,7 @@ fila/erro/*
 
 .cache/
 biblioteca/cache_externo/
+biblioteca/catalogo_midias.json
 projetos/*/midias_baixadas/
 projetos/*/render/
 projetos/*/audio/

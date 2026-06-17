@@ -24,13 +24,14 @@ def gerar_roteiro_projeto(pasta_projeto: Path) -> str:
         {
             "tema": tema,
             "estrutura": [
-                "gancho",
-                "contexto rapido",
-                "desenvolvimento",
-                "virada",
-                "fechamento",
+                "gancho forte",
+                "contexto cultural",
+                "mito",
+                "realidade segura",
+                "contraste",
+                "fechamento memoravel",
             ],
-            "tom": "curiosidade documental",
+            "tom": "mini-documentario cultural",
             "seguranca": "educativo, cultural e nao instrucional",
         },
     )
@@ -41,25 +42,25 @@ def gerar_roteiro_projeto(pasta_projeto: Path) -> str:
 
 def _roteiro_curiosidade_padrao(tema: str) -> str:
     return (
-        f"{tema} parece uma curiosidade pequena, até você perceber que ela virou história. "
-        "Primeiro vem a imagem: uma frase repetida, uma cena marcante, uma comparação fácil de lembrar. "
-        "Depois vem o contexto, porque quase todo mito nasce de um detalhe real que foi aumentado pelo tempo. "
-        "A virada aparece quando a fama encontra a realidade. "
-        "O que parecia simples ganha limites, personagens, dúvidas e exageros. "
-        "E é aí que o assunto fica interessante: não pelo impacto inicial, mas pelo caminho que transformou um fato em memória popular. "
-        f"No fim, {tema} mostra que algumas lendas não nascem de uma mentira. Nascem de uma verdade contada vezes demais."
+        f"{tema} parece uma curiosidade simples, mas quase toda curiosidade famosa esconde uma história maior. "
+        "Primeiro existe uma imagem forte: uma cena repetida, um objeto marcante, uma frase que fica na memória. "
+        "Depois vem o contexto, porque a cultura popular raramente cria um mito do nada; ela aumenta um detalhe real até ele parecer maior do que a própria realidade. "
+        "É nesse ponto que a história fica interessante. A fama muda o modo como as pessoas enxergam o objeto, o personagem ou o acontecimento. "
+        "O que era apenas um fato ganha atmosfera, exagero, comparação e até um pouco de mistério. "
+        "Quando olhamos com calma, a diferença entre o símbolo e o mundo real revela mais sobre nós do que sobre o próprio tema. "
+        f"No fim, {tema} mostra como uma lenda nasce quando realidade, memória e imaginação começam a contar a mesma história de jeitos diferentes."
     )
 
 
 def _roteiro_arma_cultural(tema: str) -> str:
     return (
-        "Ela virou símbolo de força no cinema. "
-        f"Mas a fama de {tema} não nasceu só da potência. Nasceu da imagem. Do som. Da forma como Hollywood transformou um objeto mecânico em lenda. "
-        "Durante anos, filmes e histórias policiais venderam a ideia de algo quase imparável. "
-        "Só que fora da tela, a conversa muda. "
-        "Potência não significa controle, e controle importa muito mais do que a cena costuma mostrar. "
-        "Peso, recuo e contexto fazem a realidade parecer menos cinematográfica, mas muito mais interessante. "
-        f"No fim, {tema} é menos sobre ser imparável, e mais sobre como o cinema transforma mecânica em mito."
+        f"{tema} virou símbolo cultural porque o cinema transformou um objeto mecânico em personagem. "
+        "Na tela, ele aparece com presença, som e impacto visual, como se carregasse sozinho uma ideia de autoridade e exagero. "
+        "Essa imagem ficou tão forte que muita gente conhece a lenda antes de conhecer o contexto. "
+        "Mas fora da ficção, a história é menos simples e mais interessante. Potência também significa peso, recuo, volume e dificuldade de controle, ideias gerais que mudam completamente a leitura daquele mito. "
+        "Por isso, a fama não vem apenas de números, metal ou engenharia. Vem da mistura entre design, cultura pop, histórias policiais e a linguagem dramática de Hollywood. "
+        "O cinema pegou um objeto real e ampliou sua presença até ele parecer maior do que a vida cotidiana. "
+        f"No fim, {tema} não é uma lição sobre uso ou poder prático. É um exemplo de como a cultura transforma mecânica em mito, e mito em memória visual."
     )
 
 

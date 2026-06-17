@@ -37,6 +37,7 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
     tema = _tema_projeto(pasta_projeto)
     render_dir = pasta_projeto / "render"
     render_dir.mkdir(parents=True, exist_ok=True)
+    salvar_json(render_dir / "composicao_vertical.json", [])
 
     segmentos = []
     stats = {"cenas": len(cenas), "midias": 0, "fallback": 0}
@@ -68,6 +69,15 @@ def montar_video(base_dir: Path, pasta_projeto: Path) -> Path:
                     tema=tema,
                     total_cenas=len(cenas),
                     blocos_srt=blocos_srt,
+                )
+            elif item.get("segmentos_visuais") and len(item.get("segmentos_visuais", [])) > 1:
+                segmentos_cena, usou_midia = _renderizar_segmentos_visuais(
+                    cena=cena,
+                    item=item,
+                    base_dir=base_dir,
+                    pasta_projeto=pasta_projeto,
+                    tema=tema,
+                    total_cenas=len(cenas),
                 )
             else:
                 segmento = render_dir / f"cena_{int(cena['id']):03}.mp4"
@@ -208,8 +218,11 @@ def _renderizar_cena(
             "-t",
             duracao,
             "-filter_complex",
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,"
-            "eq=brightness=-0.18[bg];[bg][1:v]overlay=0:0,format=yuv420p[v]",
+            "[0:v]split=2[bgsrc][fgsrc];"
+            "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+            "gblur=sigma=20,eq=brightness=-0.35,setsar=1[bg];"
+            "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[tmp];[tmp][1:v]overlay=0:0,format=yuv420p,setsar=1[v]",
             "-map",
             "[v]",
             "-an",
@@ -223,8 +236,30 @@ def _renderizar_cena(
             "28",
             str(saida),
         ]
-        _executar_cena(cmd, pasta_projeto, cena_id)
+        try:
+            _executar_cena(cmd, pasta_projeto, cena_id)
+        except RuntimeError:
+            _registrar_composicao_vertical(
+                pasta_projeto,
+                cena_id=cena_id,
+                arquivo=arquivo,
+                erro="erro_composicao_vertical; usando fallback de crop seguro",
+                fallback=True,
+                horizontal_blur=True,
+                crop_seguro=True,
+            )
+            cmd = _cmd_video_crop_seguro(arquivo, overlay, saida, duracao)
+            _executar_cena(cmd, pasta_projeto, cena_id)
         _validar_video_gerado(saida, cmd=cmd)
+        _registrar_composicao_vertical(
+            pasta_projeto,
+            cena_id=cena_id,
+            arquivo=arquivo,
+            erro="",
+            fallback=False,
+            horizontal_blur=True,
+            crop_seguro=True,
+        )
         return True
 
     imagem_cena = pasta_projeto / "render" / f"cena_{cena_id:03}.png"
@@ -245,7 +280,7 @@ def _renderizar_cena(
         "-i",
         str(imagem_cena),
         "-vf",
-        "scale=1080:1920,format=yuv420p",
+        "scale=1080:1920,setsar=1,format=yuv420p",
         "-an",
         "-c:v",
         "libx264",
@@ -266,6 +301,71 @@ def _renderizar_cena(
     return background is not None
 
 
+def _cmd_video_crop_seguro(arquivo: Path, overlay: Path, saida: Path, duracao: str) -> list[str]:
+    return [
+        "ffmpeg",
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(arquivo),
+        "-i",
+        str(overlay),
+        "-t",
+        duracao,
+        "-filter_complex",
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+        "setsar=1[bg];[bg][1:v]overlay=0:0,format=yuv420p,setsar=1[v]",
+        "-map",
+        "[v]",
+        "-an",
+        "-r",
+        "30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        str(saida),
+    ]
+
+
+def _renderizar_segmentos_visuais(
+    cena: dict,
+    item: dict,
+    base_dir: Path,
+    pasta_projeto: Path,
+    tema: str,
+    total_cenas: int,
+) -> tuple[list[Path], bool]:
+    render_dir = pasta_projeto / "render"
+    cena_id = int(cena["id"])
+    segmentos_plano = item.get("segmentos_visuais", [])
+    total_duracao = max(0.5, float(cena.get("duracao", 5)))
+    partes = max(1, len(segmentos_plano))
+    segmentos = []
+    usou_midia = False
+    for idx, segmento_plano in enumerate(segmentos_plano, start=1):
+        cena_sub = dict(cena)
+        cena_sub["duracao"] = total_duracao / partes
+        if idx > 1:
+            cena_sub["texto_tela"] = ""
+        arquivo = _resolver_arquivo_midia(base_dir, pasta_projeto, segmento_plano.get("midia"))
+        saida = render_dir / f"cena_{cena_id:03}_visual_{idx:02}.mp4"
+        _apagar_mp4_vazio(saida)
+        usou_midia = _renderizar_cena(
+            cena=cena_sub,
+            arquivo=arquivo if arquivo and arquivo.exists() else None,
+            saida=saida,
+            pasta_projeto=pasta_projeto,
+            tema=tema,
+            total_cenas=total_cenas,
+        ) or usou_midia
+        segmentos.append(saida)
+    return segmentos, usou_midia
+
+
 def _cmd_imagem_ken_burns(background: Path, overlay: Path, saida: Path, frames: int, cena_id: int) -> list[str]:
     zoom = "min(zoom+0.0012,1.12)" if cena_id % 2 else "min(zoom+0.0010,1.10)"
     x_expr = "iw/2-(iw/zoom/2)"
@@ -273,8 +373,8 @@ def _cmd_imagem_ken_burns(background: Path, overlay: Path, saida: Path, frames: 
     filtro = (
         "[0:v]scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840,"
         f"zoompan=z='{zoom}':x='{x_expr}':y='{y_expr}':d={frames}:s=1080x1920:fps=30,"
-        "eq=brightness=-0.12[bg];"
-        "[bg][1:v]overlay=0:0,format=yuv420p[v]"
+        "setsar=1,eq=brightness=-0.12[bg];"
+        "[bg][1:v]overlay=0:0,format=yuv420p,setsar=1[v]"
     )
     return [
         "ffmpeg",
@@ -583,19 +683,14 @@ def criar_imagem_cena(
     else:
         legenda = _encurtar(cena.get("legenda_curta") or cena.get("narracao") or "", 150)
 
-    fonte_categoria = _carregar_fonte(30)
-    fonte_topo = _carregar_fonte(32)
     fonte_principal = _fonte_para_linhas(texto_principal, largura=WIDTH - 160, max_linhas=2, tamanho_max=92, tamanho_min=72)
     fonte_legenda = _fonte_para_linhas(legenda, largura=WIDTH - 180, max_linhas=3, tamanho_max=52, tamanho_min=42)
-    fonte_pequena = _carregar_fonte(28)
 
     if not transparente:
         _desenhar_textura_sutil(draw, cena_id)
 
-    _desenhar_topo(draw, titulo, fonte_categoria, fonte_topo, fonte_pequena, cena_id, total_cenas)
     _desenhar_texto_tela_dinamico(draw, texto_principal, fonte_principal, cena)
     _desenhar_legenda(draw, legenda, fonte_legenda)
-    _desenhar_progresso(draw, cena_id, total_cenas)
 
     imagem.save(caminho_saida)
     return caminho_saida
@@ -625,8 +720,6 @@ def _desenhar_topo(draw, titulo: str, fonte_categoria, fonte_titulo, fonte_numer
 
 def _texto_visual_cena(cena: dict) -> str:
     texto = " ".join((cena.get("texto_tela") or "").split())
-    if not texto:
-        texto = "Curiosidade"
     return _encurtar(texto, 46)
 
 
@@ -640,6 +733,8 @@ def _fonte_para_linhas(texto: str, largura: int, max_linhas: int, tamanho_max: i
 
 
 def _desenhar_texto_tela_dinamico(draw, texto: str, fonte, cena: dict) -> None:
+    if not texto:
+        return
     layout = cena.get("layout_texto") or _layout_texto_padrao(cena)
     largura = WIDTH - 170
     if layout in {"topo_com_stroke", "topo_cinematografico"}:
@@ -699,10 +794,7 @@ def _desenhar_legenda(draw, texto: str, fonte) -> None:
 
 
 def _desenhar_progresso(draw, cena_id: int, total_cenas: int) -> None:
-    x1, y1, x2, y2 = 80, 1814, 1000, 1824
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=5, fill=(255, 255, 255, 38))
-    largura = int((x2 - x1) * cena_id / max(total_cenas, 1))
-    draw.rounded_rectangle((x1, y1, x1 + largura, y2), radius=5, fill=(250, 204, 21, 230))
+    return
 
 
 def _desenhar_textura_sutil(draw, cena_id: int) -> None:
@@ -1048,6 +1140,32 @@ def _resolver_arquivo_midia(base_dir: Path, pasta_projeto: Path, arquivo_rel: st
     if candidato_base.exists():
         return candidato_base
     return candidato_projeto
+
+
+def _registrar_composicao_vertical(
+    pasta_projeto: Path,
+    cena_id: int,
+    arquivo: Path | None,
+    erro: str,
+    fallback: bool,
+    horizontal_blur: bool,
+    crop_seguro: bool,
+) -> None:
+    path = pasta_projeto / "render" / "composicao_vertical.json"
+    registros = carregar_json_arquivo(path, default=[])
+    registros.append(
+        {
+            "cena_id": cena_id,
+            "midia": str(arquivo) if arquivo else "",
+            "erro_composicao_vertical": erro,
+            "fallback_renderizacao_usado": fallback,
+            "midia_horizontal_adaptada_com_blur": horizontal_blur,
+            "midia_vertical_usada_diretamente": False,
+            "crop_seguro_aplicado": crop_seguro,
+            "bordas_pretas_suspeitas": False,
+        }
+    )
+    salvar_json(path, registros)
 
 
 def _registrar_erro_montagem(

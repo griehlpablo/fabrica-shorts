@@ -26,49 +26,52 @@ STOPWORDS = {
     "essa",
     "esse",
     "aqui",
+    "aquele",
+    "aquela",
 }
 
 
-TEXTOS_VISUAIS = [
-    "A lenda por trás disso",
-    "Hollywood exagerou?",
-    "A realidade é diferente",
-    "O detalhe que muda tudo",
-    "Potência não é tudo",
-    "Mito contra realidade",
-    "Por que ficou famoso?",
-    "O impacto na cultura pop",
-    "A verdade surpreende",
-]
+TEXTOS_VISUAIS = {
+    "gancho": "A LENDA COMEÇA AQUI",
+    "cultura_pop": "A TELA AMPLIFICOU",
+    "mito_vs_realidade": "MITO CONTRA REALIDADE",
+    "explicacao": "",
+    "contraste": "FORA DA FICÇÃO",
+    "fechamento": "MECÂNICA VIROU MITO",
+    "contexto": "",
+}
 
 
 def gerar_cenas(roteiro: str, tema: str) -> list[dict]:
     partes = _partes_narracao(roteiro, alvo=8)
-    quantidade = max(6, min(9, len(partes)))
+    quantidade = max(7, min(10, len(partes)))
     partes = partes[:quantidade]
-    duracao_por_cena = max(4, min(7, ceil(48 / quantidade)))
+    duracao_por_cena = max(5, min(9, ceil(65 / max(quantidade, 1))))
 
     cenas = []
     inicio = 0
+    total = len(partes)
     for idx, narracao in enumerate(partes, start=1):
+        funcao = _funcao_por_indice(idx, total, narracao)
         palavras = _palavras_chave(narracao, tema)
-        duracao = duracao_por_cena
+        texto_tela = _texto_tela(idx, total, tema, funcao, narracao)
         cenas.append(
             {
                 "id": idx,
                 "inicio_estimado": inicio,
-                "duracao": duracao,
+                "duracao": duracao_por_cena,
                 "narracao": narracao,
-                "texto_tela": _texto_tela(idx, tema, palavras),
+                "texto_tela": texto_tela,
                 "legenda_curta": _legenda_curta(narracao),
-                "midia_necessaria": f"Imagem ou video relacionado a {', '.join(palavras[:3])}",
+                "midia_necessaria": f"B-roll documental relacionado a {', '.join(palavras[:3])}",
                 "palavras_chave": palavras,
                 "palavras_chave_slug": _slug_palavras_chave(palavras),
-                "tipo_midia": "imagem" if idx % 3 else "video",
+                "funcao_narrativa_sugerida": funcao,
+                "tipo_midia": "video" if funcao in {"gancho", "cultura_pop", "mito_vs_realidade", "contraste"} else "imagem",
                 "status_midia": "pendente",
             }
         )
-        inicio += duracao
+        inicio += duracao_por_cena
     return cenas
 
 
@@ -94,37 +97,59 @@ def gerar_cenas_projeto(pasta_projeto, tema: str | None = None) -> list[dict]:
 
 
 def _partes_narracao(roteiro: str, alvo: int) -> list[str]:
-    frases = [f.strip() for f in re.split(r"(?<=[.!?])\s+", roteiro) if f.strip()]
-    partes: list[str] = []
+    frases = [normalizar_texto_portugues(f) for f in re.split(r"(?<=[.!?])\s+", roteiro) if f.strip()]
+    if not frases:
+        return []
+    grupos: list[str] = []
+    atual: list[str] = []
     for frase in frases:
-        subpartes = [p.strip() for p in re.split(r",|;|:", frase) if p.strip()]
-        if len(subpartes) > 1:
-            partes.extend(_juntar_partes_curtas(subpartes))
+        atual.append(frase)
+        palavras = len(" ".join(atual).split())
+        if len(atual) >= 2 or palavras >= 24:
+            grupos.append(" ".join(atual))
+            atual = []
+    if atual:
+        if grupos and len(" ".join(atual).split()) < 10:
+            grupos[-1] = f"{grupos[-1]} {' '.join(atual)}"
         else:
-            partes.append(frase)
+            grupos.append(" ".join(atual))
 
-    if len(partes) < 6:
-        palavras = roteiro.split()
-        tamanho = max(8, ceil(len(palavras) / alvo))
-        partes = [" ".join(palavras[i : i + tamanho]).strip() for i in range(0, len(palavras), tamanho)]
+    if len(grupos) < 7 and len(frases) <= 10:
+        grupos = frases
+    if len(grupos) > 10:
+        grupos = _compactar_grupos(grupos, alvo=alvo)
+    return [p if p.endswith((".", "!", "?")) else p + "." for p in grupos if p]
 
-    return [p if p.endswith((".", "!", "?")) else p + "." for p in partes if p]
 
-
-def _juntar_partes_curtas(partes: list[str]) -> list[str]:
+def _compactar_grupos(grupos: list[str], alvo: int) -> list[str]:
     resultado = []
     atual = ""
-    for parte in partes:
-        tentativa = f"{atual}, {parte}".strip(", ") if atual else parte
-        if len(tentativa.split()) <= 16:
+    for grupo in grupos:
+        tentativa = f"{atual} {grupo}".strip()
+        if atual and (len(resultado) + 1 < alvo) and len(tentativa.split()) <= 34:
             atual = tentativa
         else:
             if atual:
                 resultado.append(atual)
-            atual = parte
+            atual = grupo
     if atual:
         resultado.append(atual)
     return resultado
+
+
+def _funcao_por_indice(idx: int, total: int, narracao: str) -> str:
+    texto = narracao.lower()
+    if idx == 1:
+        return "gancho"
+    if idx == total:
+        return "fechamento"
+    if any(t in texto for t in ["cinema", "hollywood", "tela", "cultura"]):
+        return "cultura_pop"
+    if any(t in texto for t in ["potência", "peso", "recuo", "controle", "engenharia"]):
+        return "explicacao"
+    if any(t in texto for t in ["ficção", "realidade", "mito", "limites"]):
+        return "contraste"
+    return "contexto"
 
 
 def _palavras_chave(texto: str, tema: str) -> list[str]:
@@ -134,32 +159,31 @@ def _palavras_chave(texto: str, tema: str) -> list[str]:
             termo = normalizar_texto_portugues(raw)
             if termo and termo not in STOPWORDS and termo not in termos:
                 termos.append(termo)
-    return termos[:8] or ["curiosidade", "documentario", "fatos"]
+    return termos[:10] or ["curiosidade", "documentario", "fatos"]
 
 
-def _texto_tela(idx: int, tema: str, palavras: list[str]) -> str:
-    if idx == 1:
-        return _titulo_curto_tema(tema)
-    if idx - 2 < len(TEXTOS_VISUAIS):
-        texto = TEXTOS_VISUAIS[idx - 2]
-        if idx == 5 and palavras:
-            texto = f"{palavras[0].replace('_', ' ').title()} não é tudo"
+def _texto_tela(idx: int, total: int, tema: str, funcao: str, narracao: str) -> str:
+    if funcao == "gancho":
+        return _titulo_curto_tema(tema).upper()
+    if funcao == "cultura_pop" and idx > 3:
+        return ""
+    if funcao in {"explicacao", "contexto"} and idx not in {3, total - 1}:
+        return ""
+    texto = TEXTOS_VISUAIS.get(funcao, "")
+    if texto:
         return texto
-    if palavras:
-        return palavras[0].replace("_", " ").title()
-    return "Curiosidade"
+    if idx == total:
+        return "MECÂNICA VIROU MITO"
+    return ""
 
 
 def _legenda_curta(texto: str) -> str:
-    texto = " ".join(texto.split())
-    return texto
+    return " ".join(texto.split())
 
 
 def _titulo_curto_tema(tema: str) -> str:
-    tema = " ".join(tema.split())
-    if len(tema) <= 34:
-        return tema
-    return tema
+    palavras = " ".join(tema.split()).split()
+    return " ".join(palavras[:6])
 
 
 def _slug_palavras_chave(palavras: list[str]) -> list[str]:

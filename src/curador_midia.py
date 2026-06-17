@@ -65,6 +65,7 @@ def _montar_plano_midias(pasta_projeto: Path, plano_visual: list[dict], catalogo
             usados.add(escolhido["arquivo"])
             anterior = escolhido["arquivo"]
             fontes_registro.append(_fonte_de_candidato(cena, escolhido))
+        segmentos_visuais = _segmentos_visuais(cena, escolhido, candidatos)
         layout_texto = _layout_texto(cena)
         fallback_estilo = _fallback_estilo(cena)
         motivo_score_baixo = _motivo_score_baixo(cena, candidatos, rejeitados_termo, escolhido, catalogo)
@@ -96,6 +97,8 @@ def _montar_plano_midias(pasta_projeto: Path, plano_visual: list[dict], catalogo
             "sugestoes_de_busca_en": cena.get("palavras_chave_en", [])[:5],
             "tipo_de_midia_recomendada": cena.get("tipo_de_midia_ideal", [])[:4],
             "reutilizacao_controlada": reutilizacao_controlada,
+            "segmentos_visuais": segmentos_visuais,
+            "corte_visual_interno": len(segmentos_visuais) > 1,
             "status": "fallback" if fallback_usado else "selecionada",
         }
         plano.append(item)
@@ -120,7 +123,11 @@ def _escolher_candidato(candidatos: list[dict]) -> dict | None:
 def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str | None) -> dict:
     texto = " ".join([item["nome"], " ".join(item.get("tags", [])), item.get("query_usada", "")]).lower()
     palavras = [*cena.get("palavras_chave_pt", []), *cena.get("palavras_chave_en", [])]
+    query = " ".join([str(cena.get("query_visual_principal", "")), *cena.get("query_visual_alternativas", [])]).lower()
+    intencao = str(cena.get("intencao_visual", "")).lower()
     relevancia = sum(8 for palavra in palavras if criar_slug(str(palavra)).replace("_", " ") in texto or str(palavra).lower() in texto)
+    relevancia += sum(10 for termo in query.split() if len(termo) >= 4 and termo in texto)
+    relevancia += sum(4 for termo in intencao.split() if len(termo) >= 5 and termo in texto)
     tipo = 0
     tipos_ideais = set(cena.get("tipo_de_midia_ideal", []))
     if item["tipo"] == "video" and tipos_ideais & {"video_curto", "broll", "demonstracao_controlada"}:
@@ -131,15 +138,16 @@ def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str |
         tipo += 10
     if "cinema" in tipos_ideais and any(t in texto for t in ["cinema", "movie", "film", "hollywood"]):
         tipo += 10
-    qualidade = 10 if item["tipo"] == "video" else 4
+    qualidade = 14 if item["tipo"] == "video" else 4
     if item.get("orientacao") == "vertical":
         qualidade += 8
-    licenca = 12 if item.get("status") == "aprovado" else -4 if item.get("status") == "local_sem_licenca" else 0
+    licenca = 18 if item.get("status") == "aprovado" else -4 if item.get("status") == "local_sem_licenca" else 0
+    provedor = 10 if item.get("provedor") not in {"Local", "", None} else 0
     repeticao_consecutiva = item["arquivo"] == anterior
     ja_usado = item["arquivo"] in usados
     diversidade = -80 if repeticao_consecutiva else -18 if ja_usado else 0
-    penalidade = -60 if _tem_termo_evitado(cena, item) else 0
-    score = relevancia + tipo + qualidade + licenca + diversidade + penalidade
+    penalidade = -100 if _tem_termo_evitado(cena, item) or not _check_seguranca_visual(cena, item) else 0
+    score = relevancia + tipo + qualidade + licenca + provedor + diversidade + penalidade
     motivos = []
     if relevancia:
         motivos.append("palavras-chave compatíveis")
@@ -149,6 +157,8 @@ def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str |
         motivos.append("orientação vertical")
     if licenca > 0:
         motivos.append("licença registrada")
+    if provedor:
+        motivos.append("provedor externo licenciado")
     if diversidade < 0:
         motivos.append("penalidade por repetição")
     candidato = {
@@ -163,8 +173,49 @@ def _avaliar_candidato(cena: dict, item: dict, usados: set[str], anterior: str |
         "orientacao": item.get("orientacao"),
         "ja_usado": ja_usado,
         "repeticao_consecutiva": repeticao_consecutiva,
+        "query_usada": item.get("query_usada", ""),
     }
     return candidato
+
+
+def _segmentos_visuais(cena: dict, escolhido: dict | None, candidatos: list[dict]) -> list[dict]:
+    duracao = float(cena.get("duracao", 0) or 0)
+    principal = escolhido["arquivo"] if escolhido else None
+    if duracao < 7:
+        return [{"inicio": 0, "fim": duracao, "midia": principal, "motivo_da_troca": "cena curta"}]
+    alternativo = None
+    for candidato in candidatos:
+        if escolhido and candidato["arquivo"] == escolhido["arquivo"]:
+            continue
+        if candidato.get("score", 0) > -25 and not candidato.get("repeticao_consecutiva"):
+            alternativo = candidato["arquivo"]
+            break
+    metade = round(duracao / 2, 2)
+    if alternativo:
+        return [
+            {"inicio": 0, "fim": metade, "midia": principal, "motivo_da_troca": "inicio da ideia visual"},
+            {"inicio": metade, "fim": duracao, "midia": alternativo, "motivo_da_troca": "corte visual interno para manter ritmo"},
+        ]
+    return [
+        {
+            "inicio": 0,
+            "fim": duracao,
+            "midia": principal,
+            "motivo_da_troca": "cena longa sem segunda midia adequada; variar crop/movimento",
+        }
+    ]
+
+
+def _check_seguranca_visual(cena: dict, item: dict) -> bool:
+    if not cena.get("check_seguranca_visual", True):
+        return True
+    texto = " ".join([item.get("arquivo", ""), " ".join(item.get("tags", [])), item.get("query_usada", "")]).lower()
+    proibidos = ["gore", "injury", "kill", "combat", "tactical", "self defense", "tutorial", "how to shoot"]
+    if any(p in texto for p in proibidos):
+        return False
+    if cena.get("permitir_midia_arma_real") is False and any(t in texto for t in ["shooting tutorial", "gun training", "combat"]):
+        return False
+    return True
 
 
 def _layout_texto(cena: dict) -> str:

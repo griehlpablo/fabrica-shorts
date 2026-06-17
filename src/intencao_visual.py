@@ -98,7 +98,7 @@ def gerar_plano_visual(pasta_projeto: Path) -> list[dict]:
 
 def _classificar_cena(cena: dict, tema: str, roteiro: str, indice: int, total: int) -> dict:
     texto_narrado = normalizar_texto_portugues(str(cena.get("narracao", "")))
-    texto_tela = _texto_tela_curto(str(cena.get("texto_tela") or "Curiosidade"))
+    texto_tela = _texto_tela_curto(str(cena.get("texto_tela") or ""))
     base = normalizar_texto_portugues(f"{tema} {texto_tela} {texto_narrado}").lower()
     melhor = None
     melhor_score = -1
@@ -110,10 +110,14 @@ def _classificar_cena(cena: dict, tema: str, roteiro: str, indice: int, total: i
 
     if melhor_score <= 0:
         melhor = _regra_default(indice, total)
+    if cena.get("funcao_narrativa_sugerida") and melhor_score <= 1:
+        melhor = _regra_por_funcao(str(cena.get("funcao_narrativa_sugerida"))) or melhor
 
     palavras_pt = _unicos([tema, *melhor["pt"], *cena.get("palavras_chave", [])])
     palavras_en = _unicos([*melhor["en"], *_termos_en_tema(tema)])
     evitar = _unicos([*DEFAULT_EVITAR, *melhor["evitar"]])
+    sensivel = _tema_sensivel(tema)
+    query_principal, query_alternativas = _queries_contextuais(melhor["funcao_narrativa"], tema)
     return {
         "cena_id": cena["id"],
         "texto_narrado": texto_narrado,
@@ -122,11 +126,25 @@ def _classificar_cena(cena: dict, tema: str, roteiro: str, indice: int, total: i
         "emocao": melhor["emocao"],
         "intencao_visual": _intencao_visual(melhor, tema),
         "tipo_de_midia_ideal": melhor["tipos"],
+        "tipo_midia_preferido": melhor["tipos"],
         "palavras_chave_pt": palavras_pt[:10],
         "palavras_chave_en": palavras_en[:10],
+        "query_visual_principal": query_principal,
+        "query_visual_alternativas": query_alternativas,
+        "query_segura": True,
+        "check_seguranca_visual": True,
+        "nivel_sensibilidade": "medio" if sensivel else "baixo",
+        "permitir_midia_arma_real": False if sensivel else True,
         "evitar": evitar,
         "prioridade_visual": int(melhor["prioridade"]),
     }
+
+
+def _regra_por_funcao(funcao: str) -> dict | None:
+    for regra in REGRAS_INTENCAO:
+        if regra.get("funcao_narrativa") == funcao:
+            return regra
+    return None
 
 
 def _regra_default(indice: int, total: int) -> dict:
@@ -164,6 +182,46 @@ def _texto_tela_curto(texto: str) -> str:
     return " ".join(palavras[:6])
 
 
+def _queries_contextuais(funcao: str, tema: str) -> tuple[str, list[str]]:
+    if _tema_sensivel(tema):
+        mapa = {
+            "cultura_pop": (
+                "movie theater cinema projector old film reel",
+                ["dark cinema", "action movie aesthetic", "film grain projector"],
+            ),
+            "mito_vs_realidade": (
+                "cinematic metal close up dramatic shadow",
+                ["documentary background", "mechanical detail close up", "slow motion impact"],
+            ),
+            "explicacao": (
+                "mechanical detail close up dramatic light",
+                ["metal texture macro", "engineering detail", "dark documentary background"],
+            ),
+            "contraste": (
+                "dark documentary background dramatic shadow",
+                ["smoke texture", "cinematic object close up", "dramatic light"],
+            ),
+            "fechamento": (
+                "dark cinematic background smoke texture",
+                ["film grain", "dramatic light", "documentary ending background"],
+            ),
+            "gancho": (
+                "cinematic dark background dramatic light",
+                ["movie theater", "metal close up", "film reel"],
+            ),
+        }
+        return mapa.get(funcao, mapa["gancho"])
+    return (
+        f"{criar_slug(tema).replace('_', ' ')} documentary b roll",
+        ["cinematic background", "documentary texture", "close up detail"],
+    )
+
+
+def _tema_sensivel(tema: str) -> bool:
+    texto = tema.lower()
+    return any(t in texto for t in ["arma", "revólver", "revolver", "pistola", "magnum", ".44", "44"])
+
+
 def _termos_en_tema(tema: str) -> list[str]:
     texto = criar_slug(tema).replace("_", " ")
     extras = [texto] if texto else []
@@ -184,6 +242,9 @@ def _salvar_shotlist(pasta_projeto: Path, plano: list[dict]) -> None:
                 f"- mídia ideal: {', '.join(item['tipo_de_midia_ideal'])}",
                 f"- palavras-chave PT: {', '.join(item['palavras_chave_pt'])}",
                 f"- palavras-chave EN: {', '.join(item['palavras_chave_en'])}",
+                f"- query principal: {item.get('query_visual_principal', '')}",
+                f"- alternativas: {', '.join(item.get('query_visual_alternativas', []))}",
+                f"- segurança visual: {item.get('nivel_sensibilidade', 'baixo')} / arma real permitida: {item.get('permitir_midia_arma_real')}",
                 f"- evitar: {', '.join(item['evitar'])}",
                 f"- prioridade: {item['prioridade_visual']}",
                 "",

@@ -10,7 +10,7 @@ from pathlib import Path
 from src.alinhamento import alinhar_legenda
 from src.cenas import gerar_cenas, gerar_cenas_projeto
 from src.curador_midia import verificar_midias
-from src.fontes_midia import apis_configuradas
+from src.fontes_midia import apis_configuradas, testar_pexels
 from src.intencao_visual import gerar_plano_visual
 from src.legendas import duracao_srt, fonte_legenda, gerar_legendas, ler_srt
 from src.montador import montar_video
@@ -93,6 +93,10 @@ def cmd_testar_texto(args: argparse.Namespace) -> None:
         print(f"{palavra}: {'preservado' if palavra in lido else 'PERDIDO'}")
 
 
+def cmd_testar_pexels(args: argparse.Namespace) -> None:
+    raise SystemExit(testar_pexels())
+
+
 def cmd_vozes(args: argparse.Namespace) -> None:
     print("Vozes sugeridas para curiosidade_narrada:")
     for voz in listar_vozes():
@@ -112,11 +116,13 @@ def cmd_diagnostico(args: argparse.Namespace) -> None:
     legenda_pacote = pasta / "pacote_postagem" / "legenda.srt"
     video = pasta / "pacote_postagem" / "video_final.mp4"
     montagem = pasta / "render" / "montagem.json"
+    composicao_vertical = pasta / "render" / "composicao_vertical.json"
 
     print(f"Projeto: {pasta}")
     print(f"Projeto existe: {_sim_nao(pasta.exists())}")
     print(f"roteiro/roteiro_narrado.txt: {_status_arquivo(roteiro)}")
     print(f"Roteiro preserva acentos: {_sim_nao(_texto_tem_acentos(roteiro))}")
+    _diagnostico_roteiro_v4(roteiro, audio)
     print(f"audio/narracao.mp3: {_status_arquivo(pasta / 'audio' / 'narracao.mp3')}")
     print(f"audio/narracao.wav: {_status_arquivo(pasta / 'audio' / 'narracao.wav')}")
     print(f"Caminho do audio: {audio if audio else 'nao encontrado'}")
@@ -160,6 +166,11 @@ def cmd_diagnostico(args: argparse.Namespace) -> None:
         print("AVISO: legenda contem reticencias. Verifique se sao do roteiro original ou truncamento indevido.")
     print(f"Legenda renderizada por ASS/libass: {_sim_nao(_montagem_flag(montagem, 'legenda_ass_aplicada'))}")
     print(f"Fallback Pillow usado: {_sim_nao(_montagem_flag(montagem, 'fallback_pillow_legenda'))}")
+    _diagnostico_composicao_vertical(composicao_vertical)
+    print("Elementos de template removidos:")
+    print("- rotulo de nicho removido: sim")
+    print("- contador de cena removido: sim")
+    print("- barra de progresso removida: sim")
     _diagnostico_visual_direitos(pasta)
     if video.exists() and ffprobe_disponivel():
         resolucao = _resolucao_video(video)
@@ -281,6 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
     testar_texto = sub.add_parser("testar-texto", help="Valida preservacao de acentos em UTF-8.")
     testar_texto.set_defaults(func=cmd_testar_texto)
 
+    testar_pexels_cmd = sub.add_parser("testar-pexels", help="Testa endpoint de video da Pexels sem baixar midia.")
+    testar_pexels_cmd.set_defaults(func=cmd_testar_pexels)
+
     vozes = sub.add_parser("vozes", help="Lista vozes sugeridas para edge-tts.")
     vozes.set_defaults(func=cmd_vozes)
 
@@ -371,6 +385,37 @@ def _texto_contem_reticencias(path: Path) -> bool:
     return "..." in path.read_text(encoding="utf-8", errors="replace")
 
 
+def _diagnostico_roteiro_v4(roteiro: Path, audio: Path | None) -> None:
+    texto = roteiro.read_text(encoding="utf-8", errors="replace") if roteiro.exists() else ""
+    palavras = [p for p in texto.split() if p.strip()]
+    duracao = obter_duracao_midia(audio) if audio else None
+    duracao_estimada = duracao or (len(palavras) / 145 * 60 if palavras else None)
+    ppm = (len(palavras) / duracao_estimada * 60) if duracao_estimada else None
+    print("Roteiro V4:")
+    print(f"- palavras do roteiro: {len(palavras)}")
+    print(f"- duracao estimada: {_fmt_duracao(duracao_estimada)}")
+    print(f"- palavras por minuto estimadas: {ppm:.1f}" if ppm else "- palavras por minuto estimadas: indisponivel")
+    print(f"- roteiro abaixo do minimo desejado: {_sim_nao(len(palavras) < 120)}")
+    print(f"- roteiro parece curto demais: {_sim_nao(len(palavras) < 100)}")
+
+
+def _diagnostico_composicao_vertical(path: Path) -> None:
+    registros = carregar_json_arquivo(path, default=[]) if path.exists() else []
+    print("Composicao vertical FFmpeg:")
+    print(f"- registros: {len(registros)}")
+    print(f"- bordas pretas detectadas ou suspeitas: {_sim_nao(any(r.get('bordas_pretas_suspeitas') for r in registros))}")
+    print(f"- fallback de renderizacao: {_sim_nao(any(r.get('fallback_renderizacao_usado') for r in registros))}")
+    print(f"- midia horizontal adaptada com blur: {_sim_nao(any(r.get('midia_horizontal_adaptada_com_blur') for r in registros))}")
+    print(f"- midia vertical usada diretamente: {_sim_nao(any(r.get('midia_vertical_usada_diretamente') for r in registros))}")
+    print(f"- crop seguro aplicado: {_sim_nao(any(r.get('crop_seguro_aplicado') for r in registros))}")
+    for registro in registros:
+        if registro.get("fallback_renderizacao_usado") or registro.get("erro_composicao_vertical"):
+            print(
+                f"- Cena {registro.get('cena_id')} fallback renderizacao: "
+                f"{registro.get('erro_composicao_vertical') or 'sem erro registrado'}"
+            )
+
+
 def _diagnostico_visual_direitos(pasta: Path) -> None:
     plano_visual = pasta / "plano_visual.json"
     shotlist = pasta / "shotlist.md"
@@ -380,6 +425,7 @@ def _diagnostico_visual_direitos(pasta: Path) -> None:
     print(f"shotlist.md existe: {_sim_nao(shotlist.exists())}")
     print(f"fontes_midias.json existe: {_sim_nao(fontes.exists())}")
     plano = carregar_json_arquivo(plano_midias, default=[])
+    cenas = carregar_json_arquivo(pasta / "cenas.json", default=[])
     registros = carregar_json_arquivo(fontes, default=[])
     base_dir = BASE_DIR
     videos_locais = _contar_midias_dir(base_dir / "biblioteca" / "videos", {".mp4", ".mov", ".mkv", ".webm"})
@@ -402,7 +448,28 @@ def _diagnostico_visual_direitos(pasta: Path) -> None:
     sem_licenca = max(sem_licenca, sum(1 for item in plano if item.get("provedor") == "Local" and not item.get("licenca")))
     print(f"Midias sem licenca: {sem_licenca}")
     print(f"Midias para revisar: {sum(1 for item in registros if item.get('status') == 'revisar')}")
-    print("Visual V3.1:")
+    print(f"Numero de cenas: {len(cenas)}")
+    cenas_com_texto = sum(1 for cena in cenas if str(cena.get("texto_tela", "")).strip())
+    cenas_sem_texto = len(cenas) - cenas_com_texto
+    percentual = (cenas_com_texto / len(cenas) * 100) if cenas else 0
+    print(f"Cenas com texto_tela: {cenas_com_texto}")
+    print(f"Cenas sem texto_tela: {cenas_sem_texto}")
+    print(f"Percentual de cenas com texto_tela: {percentual:.1f}%")
+    if cenas and cenas_com_texto == len(cenas):
+        print("AVISO: todas as cenas usam texto_tela; considere tornar o texto visual mais seletivo.")
+    cortes = [item for item in plano if item.get("corte_visual_interno")]
+    total_segmentos = sum(len(item.get("segmentos_visuais", [])) for item in plano)
+    print(f"Cenas com corte visual interno: {len(cortes)}")
+    print(f"Segmentos visuais: {total_segmentos}")
+    longas_sem_corte = [
+        str(item.get("cena_id"))
+        for item in plano
+        if not item.get("corte_visual_interno") and any(float(seg.get("fim", 0)) - float(seg.get("inicio", 0)) >= 7 for seg in item.get("segmentos_visuais", []))
+    ]
+    print(f"Cenas longas sem troca visual: {', '.join(longas_sem_corte) if longas_sem_corte else 'nenhuma'}")
+    provedores = sorted({str(item.get("provedor")) for item in plano if item.get("provedor") not in {"Local", "fallback", None}})
+    print(f"Provedores externos usados: {', '.join(provedores) if provedores else 'nenhum'}")
+    print("Visual V4:")
     caixas = _contar_por_chave(plano, "texto_caixa")
     layouts = _contar_por_chave(plano, "layout_texto")
     print(f"- Textos com caixa grande: {caixas.get('caixa_grande', 0)}")
